@@ -1,0 +1,31 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "i10p_adp_normal_policy_lowesterror_nn",
+  "instance": "instances/instance_10p.json",
+  "training": {
+    "time_budget": 86400,
+    "eval_interval": 1000000,
+    "update_interval": 50,
+    "truncation_mode": "bootstrap",
+    "buffer_capacity": 200000,
+    "buffer_strategy": "lowest_error",
+    "n_eval_episodes": 10,
+    "n_workers": 8,
+    "n_warmstart_episodes": 1667,
+    "warmstart": {
+      "agent_type": "reactive",
+      "extra": {
+        "threshold": 0.999974841735008,
+        "repair_threshold": 0.9243058034470608,
+        "restrict_threshold": 0.3342102412249225
+      }
+    }
+  },
+  "agent": {
+    "agent_type": "adp",
+    "value_fn": "neural",
+    "action_gen": "local_search"
+  }
+}

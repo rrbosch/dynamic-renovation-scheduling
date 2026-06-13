@@ -1,0 +1,20 @@
+{
+  "title": "Reinforcement Learning for Dynamic Infrastructure Renovation Scheduling",
+  "description": "Research code for scheduling maintenance actions (renovate, repair, restrict, do nothing) across a portfolio of infrastructure assets over a finite planning horizon to minimise expected discounted cost. Models stochastic degradation (usage-dependent Gamma process), renovation-duration uncertainty (Wiener process), and network traffic-flow impacts (Traffic Assignment Problem).",
+  "upload_type": "software",
+  "license": "MIT",
+  "access_right": "open",
+  "creators": [
+    { "name": "Bosch, Robbert", "affiliation": "University of Twente" },
+    { "name": "Rogetzer, Patricia", "affiliation": "University of Twente" },
+    { "name": "van Heeswijk, Wouter", "affiliation": "University of Twente" },
+    { "name": "Mes, Martijn", "affiliation": "University of Twente" }
+  ],
+  "keywords": [
+    "reinforcement learning",
+    "approximate dynamic programming",
+    "infrastructure maintenance",
+    "maintenance scheduling",
+    "traffic assignment problem"
+  ]
+}

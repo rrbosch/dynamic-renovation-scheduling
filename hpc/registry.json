@@ -1,0 +1,162 @@
+[
+  {
+    "config": "configs/i10p_ppo_curriculum.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_empty_fifo_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_empty_fifo_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_empty_knockout_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_empty_knockout_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_empty_lowesterror_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_empty_lowesterror_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_policy_fifo_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_policy_fifo_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_policy_knockout_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_policy_knockout_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_policy_lowesterror_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_normal_policy_lowesterror_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_empty_fifo_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_empty_fifo_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_empty_knockout_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_empty_knockout_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_empty_lowesterror_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_empty_lowesterror_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_policy_fifo_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_policy_fifo_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_policy_knockout_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_policy_knockout_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_policy_lowesterror_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp_seq_policy_lowesterror_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_rollout_empty.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_rollout_policy.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_seq_rollout_empty.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_seq_rollout_policy.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_optuna_paced.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_optuna_perasset.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_optuna_reactive.json",
+    "run_name": null,
+    "seed": null
+  }
+]

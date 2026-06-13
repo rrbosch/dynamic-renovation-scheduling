@@ -1,0 +1,23 @@
+{
+  "_comment": "HeuristicLocalSearch config for ReactiveAgent. Run with experiments/heuristic_local_search.py.",
+
+  "base_config": "configs/exp1_reactive.json",
+
+  "heuristic_local_search": {
+    "max_iter": 99999,
+    "n_eval_episodes": 30,
+    "verbose": true,
+
+    "init_params": {
+      "threshold": 0.7,
+      "repair_threshold": null,
+      "restrict_threshold": null
+    },
+
+    "param_grid": {
+      "threshold":          [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0],
+      "repair_threshold":   [null, 0.3, 0.4, 0.5, 0.6, 0.7],
+      "restrict_threshold": [null, 0.2, 0.3, 0.4, 0.5, 0.6]
+    }
+  }
+}

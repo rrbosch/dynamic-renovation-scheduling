@@ -1,0 +1,20 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "i10p_optuna_perasset",
+  "instance": "instances/instance_10p.json",
+  "training": {
+    "time_budget": 86400,
+    "n_eval_episodes": 50,
+    "early_stopping_seconds": 14400,
+    "n_workers": 1
+  },
+  "agent": {
+    "agent_type": "optuna_heuristic",
+    "extra": {
+      "heuristic_type": "reactiveperasset",
+      "n_tuning_episodes": 100
+    }
+  }
+}

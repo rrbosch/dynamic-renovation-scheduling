@@ -1,0 +1,21 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "i10p_adp_normal_empty_knockout",
+  "instance": "instances/instance_10p.json",
+  "training": {
+    "time_budget": 86400,
+    "eval_interval": 1000000,
+    "update_interval": 50,
+    "truncation_mode": "bootstrap",
+    "buffer_capacity": 200000,
+    "buffer_strategy": "stochastic_knockout",
+    "n_eval_episodes": 10
+  },
+  "agent": {
+    "agent_type": "adp",
+    "value_fn": "xgboost",
+    "action_gen": "local_search"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "network": "amsterdam",
+  "tap_backend": "surrogate",
+  "seed": 42,
+  "run_name": "exp2_amsterdam_surrogate",
+  "instance": "instances/instance_amsterdam_001.json",
+  "training": {
+    "n_episodes": 500,
+    "eval_interval": 50,
+    "update_interval": 10,
+    "truncation_mode": "bootstrap",
+    "buffer_capacity": 200000,
+    "buffer_strategy": "fifo",
+    "n_eval_episodes": 10
+  },
+  "agent": {
+    "agent_type": "dqn",
+    "value_fn": "xgboost",
+    "action_gen": "local_search"
+  }
+}

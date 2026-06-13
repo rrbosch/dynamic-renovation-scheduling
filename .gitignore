@@ -1,0 +1,67 @@
+# ---- Generated experiment outputs (regenerable from instances + configs + seeds) ----
+results/
+temp/
+hpc log/
+hpc_log/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.installed.cfg
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env_venv/
+ENV/
+.env
+
+# ---- Testing / coverage ----
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Notebooks ----
+.ipynb_checkpoints/
+
+# ---- IDE / editor ----
+.idea/
+.claude/settings.local.json
+.vscode/
+*.swp
+*~
+
+# ---- OS cruft ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Model / run artifacts (large, regenerable) ----
+*.pkl
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+wandb/
+
+# ---- LaTeX build artifacts (keep .tex source) ----
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.fls
+*.fdb_latexmk

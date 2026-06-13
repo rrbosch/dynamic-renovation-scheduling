@@ -1,0 +1,27 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "exp_rollout_policy",
+  "instance": "instances/instance_002.json",
+  "training": {
+    "n_episodes": 5,
+    "n_eval_episodes": 50,
+    "n_workers": 8
+  },
+  "agent": {
+    "agent_type": "rollout",
+    "extra": {
+      "n_rollouts": 20,
+      "action_threshold": 0.5,
+      "max_steps": 100,
+      "initial_action": "policy",
+      "rollout_policy": {
+        "agent_type": "reactive",
+        "threshold": 0.99,
+        "repair_threshold": 0.98,
+        "restrict_threshold": 0.28
+      }
+    }
+  }
+}

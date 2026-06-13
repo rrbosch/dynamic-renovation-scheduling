@@ -1,0 +1,16 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "exp1_paced",
+  "instance": "instances/instance_002.json",
+  "training": {
+    "n_episodes": 5,
+    "n_eval_episodes": 50,
+    "n_workers": 8
+  },
+  "agent": {
+    "agent_type": "paced",
+    "extra": {"threshold": 0.9, "pace_threshold": 2}
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "exp_simple_ppo",
+  "instance": "instances/instance_002.json",
+  "training": {
+    "time_budget": 86400,
+    "n_episodes": 10000,
+    "eval_interval": 1000,
+    "n_eval_episodes": 10,
+    "curriculum_phase0_episodes": 500,
+    "curriculum_phase1_plateau_window": 5,
+    "curriculum_phase1_plateau_tol": 0.01,
+    "curriculum_reset_critic": false
+  },
+  "agent": {
+    "agent_type": "ppo",
+    "extra": {
+      "hidden_dims": [64, 64],
+      "ppo_kwargs": {
+        "actor_lr": 3e-4,
+        "critic_lr": 1e-3,
+        "clip_eps": 0.2,
+        "entropy_coef": 0.02,
+        "value_coef": 0.5,
+        "gae_lambda": 0.95,
+        "ppo_epochs": 4,
+        "mini_batch_size": 64
+      }
+    }
+  }
+}

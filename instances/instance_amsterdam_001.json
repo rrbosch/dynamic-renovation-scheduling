@@ -1,0 +1,22 @@
+{
+  "schema_version": 4,
+  "n_assets": 20,
+  "network": "amsterdam",
+  "generation_seed": 0,
+  "years": 60,
+  "dt": 0.5,
+  "gamma": 0.97,
+  "d_fail": 1.0,
+  "c_fail": 1000.0,
+  "eta_ren": 0.05,
+  "eta_load": 0.50,
+  "delta_repair": 0.1,
+  "c_ren": 500.0,
+  "c_rep": 100.0,
+  "d_init": null,
+  "alpha0": null,
+  "kappa": null,
+  "beta": null,
+  "mu_h": null,
+  "sigma_h": null
+}

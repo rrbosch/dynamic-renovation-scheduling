@@ -1,0 +1,8 @@
+{
+  "base_config": "configs/exp1_dqn_localsearch.json",
+  "n_workers": 4,
+  "search_space": {
+    "training.update_interval": [5, 10],
+    "training.buffer_capacity": [50000, 200000]
+  }
+}

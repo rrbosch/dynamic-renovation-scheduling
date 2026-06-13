@@ -1,0 +1,16 @@
+numpy>=1.26
+scipy>=1.10
+xgboost>=2.0
+numba>=0.59
+tqdm>=4.60
+optuna>=3.0
+pandas>=2.0
+torch>=2.0
+
+# Optional: aequilibrae for the 'aequilibrae' TAP backend
+# aequilibrae>=1.5
+
+# Visualization (not needed on Snellius)
+# plotly>=5.0
+# streamlit>=1.30
+# scikit-learn>=1.3

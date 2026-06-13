@@ -1,0 +1,26 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "exp_simple_dqn_ranking_knockout",
+  "instance": "instances/instance_002.json",
+  "training": {
+    "time_budget": 86400,
+    "eval_interval": 1000000,
+    "update_interval": 50,
+    "truncation_mode": "bootstrap",
+    "buffer_capacity": 200000,
+    "buffer_strategy": "stochastic_knockout",
+    "n_eval_episodes": 10,
+    "n_warmstart_episodes": 1667,
+    "warmstart": {
+         "agent_type": "reactive",
+         "extra": { "threshold": 0.95}
+     }
+  },
+  "agent": {
+    "agent_type": "dqn",
+    "value_fn": "ranking",
+    "action_gen": "local_search"
+  }
+}

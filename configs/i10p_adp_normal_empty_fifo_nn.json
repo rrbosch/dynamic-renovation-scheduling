@@ -1,0 +1,22 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "i10p_adp_normal_empty_fifo_nn",
+  "instance": "instances/instance_10p.json",
+  "training": {
+    "time_budget": 86400,
+    "eval_interval": 1000000,
+    "update_interval": 50,
+    "truncation_mode": "bootstrap",
+    "buffer_capacity": 200000,
+    "buffer_strategy": "fifo",
+    "n_eval_episodes": 10,
+    "n_workers": 8
+  },
+  "agent": {
+    "agent_type": "adp",
+    "value_fn": "neural",
+    "action_gen": "local_search"
+  }
+}

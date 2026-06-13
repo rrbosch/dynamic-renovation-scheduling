@@ -1,0 +1,24 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "i10p_optuna_paced",
+  "instance": "instances/instance_10p.json",
+  "training": {
+    "time_budget": 86400,
+    "n_eval_episodes": 50,
+    "early_stopping_seconds": 7200,
+    "n_workers": 1
+  },
+  "agent": {
+    "agent_type": "optuna_heuristic",
+    "extra": {
+      "heuristic_type": "paced",
+      "n_tuning_episodes": 100,
+      "param_space": {
+        "threshold":       {"type": "float", "low": 0.0, "high": 1.0},
+        "pace_threshold":  {"type": "int",   "low": 1,   "high": 10}
+      }
+    }
+  }
+}

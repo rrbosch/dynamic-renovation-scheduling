@@ -1,0 +1,649 @@
+%% Packages
+\documentclass[3p, twocolumn]{elsarticle}
+\usepackage{amsmath, amssymb, amsfonts, graphicx}
+
+\journal{Computer-Aided Civil and Infrastructure Engineering}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{Reinforcement Learning for Dynamic Infrastructure Renovation Scheduling}
+
+\author[inst1]{Robbert Bosch}% \orcidID{0000-1111-2222-3333}
+\author[inst1]{Patricia Rogetzer} %{0000-0001-9582-6320}
+\author[inst1]{Wouter van Heeswijk} % \orcidID{0000-0002-5413-9660}
+\author[inst1]{Martijn Mes} %\orcidID{0000-0001-9676-5259}}
+\date{March 2025}
+
+\affiliation[inst1]{organization={University of Twente}, 
+            addressline={P.O. Box 217}, 
+            city={Enschede},
+            postcode={7500 AE}, 
+            country={The Netherlands}}
+
+\begin{abstract}
+This paper addresses the network-level maintenance, rehabilitation, and reconstruction (MR\&R) scheduling problem under stochastic deterioration, formulated as a finite-horizon Markov Decision Process (MDP) that simultaneously accounts for (i) monotone degradation via a Gamma process, (ii) uncertain renovation durations modeled as a Wiener process, traffic network effects, and multiple maintenance action types within a unified framework. The problem is notoriously difficult due to several compounding factors: the combinatorial explosion of possible schedules across dozens of assets, the coupling between decisions through network-wide traffic redistribution effects, the need to balance immediate costs against long-term degradation consequences, and the computational burden of evaluating traffic impacts for each candidate schedule. We develop and compare several solution approaches spanning heuristic policies, Deep Q-Networks with regression and ranking value function approximators, and several extensions including actor-critic methods and multi-agent reinforcement learning.
+\end{abstract}
+
+
+
+\begin{keyword}
+infrastructure maintenance \sep Markov decision process \sep stochastic degradation \sep traffic simulation \sep road network \sep optimization
+\end{keyword}
+
+\end{frontmatter}
+
+\section{Introduction}
+\label{sec:introduction}
+
+Infrastructure networks form the backbone of modern society, enabling the movement of people and goods that drives economic activity. Roads, bridges, tunnels, and other transportation assets require continuous maintenance to ensure safe and efficient operation. However, infrastructure systems worldwide face a mounting challenge: the rate of deterioration increasingly outpaces investment in maintenance and replacement, while available maintenance budgets remain constrained \citep{noauthor_asces_2017}.This creates an urgent need for optimized maintenance scheduling that maximizes the service life of infrastructure while minimizing disruption to users.
+
+The maintenance scheduling problem becomes particularly complex when considering networks of interdependent assets. When a road segment or bridge undergoes renovation, traffic must be diverted to alternative routes, causing congestion and delays throughout the network. Crucially, the disruption caused by simultaneous maintenance activities is not simply additive---closing two road segments may cause disproportionately more or less congestion than closing either one individually, depending the distribution dynamics of local traffic. This network effect means that maintenance decisions cannot be made in isolation; the timing and coordination of interventions across multiple assets significantly impacts total system performance.
+
+Furthermore, infrastructure degradation is inherently stochastic. While engineers can estimate average deterioration rates based on material properties, traffic loads, and environmental conditions, the actual progression of damage varies unpredictably. An asset expected to require renovation in ten years may deteriorate faster or slower than anticipated, creating uncertainty in maintenance planning. This uncertainty is compounded by the fact that delaying maintenance on a severely degraded asset risks emergency repairs---which are typically more costly and disruptive than planned interventions. Further uncertainty arises from the duration of maintenance activities themselves: infrastructure construction projects are notorious for running over time and over budget \citep{flyvbjerg_how_2003}, and renovation projects are no exception---delays from adverse weather, supply chain disruptions, unforeseen ground conditions, and coordination failures can all extend the period during which a road segment or bridge operates at reduced capacity. A renovation expected to complete within a single planning period may spill over into subsequent ones, prolonging the associated traffic disruption and displacing downstream maintenance activities. These challenges---network inter-dependencies, stochastic degradation, uncertain maintenance durations, and the need for long-term planning under uncertainty---motivate the development of sophisticated optimization approaches for infrastructure maintenance scheduling.
+
+This problem is an instance of the network-level maintenance, rehabilitation, and reconstruction (MR\&R) scheduling problem, which involves scheduling maintenance activities for a portfolio of assets over a multi-year planning horizon, where each asset's condition evolves stochastically and maintenance decisions affect network-wide traffic patterns. The problem is notoriously difficult due to several compounding factors: the combinatorial explosion of possible maintenance schedules across dozens of assets, the coupling between decisions through network-wide traffic redistribution effects, the need to balance immediate costs against long-term degradation consequences, and the computational burden of evaluating traffic impacts for each candidate schedule. These characteristics place the network-level MR\&R scheduling problem at the intersection of stochastic optimization, combinatorial scheduling, and traffic network modeling.
+
+The operations research and transportation engineering communities have approached this problem from complementary angles, developing methods for stochastic degradation modeling, sequential decision-making under uncertainty, and traffic-aware scheduling. However, these threads have largely evolved in isolation. No existing approach fully integrates stochastic degradation modeling, uncertain maintenance durations, multiple maintenance action types, and traffic network effects within a unified optimization framework. Section~\ref{sec:literature} reviews the relevant literature in detail and identifies the specific gap this paper addresses.
+
+This paper addresses this gap by developing an integrated framework for infrastructure maintenance scheduling. The main contributions are: (1) a finite-horizon MDP formulation where the cost function incorporates network-wide traffic disruption, combining sequential decision-making under uncertainty with realistic traffic impact assessment; (2) a monotone degradation model based on the Gamma process, enforcing the physical reality that structural deterioration is irreversible; load restrictions halve the degradation rate, making them a deliberate tool to extend asset lifetime; (3) explicit modeling of stochastic maintenance durations, recognizing that renovation and repair activities are subject to delays that propagate through network-wide traffic effects; (4) an extended action space that includes not only renovation and minor repairs, but also load restrictions as deliberate decisions that trade reduced degradation against ongoing traffic disruption; and (5) a scalable solution methodology that addresses the computational challenges of optimizing maintenance schedules for networks of 20–80 assets, evaluated over episodic simulations of 120 years that reflect realistic multi-decade planning obligations. 
+
+The remainder of this paper is organized as follows. Section~\ref{sec:literature} reviews the relevant literature on infrastructure maintenance optimization, degradation modeling, and traffic-aware scheduling. Section~\ref{sec:problem} formally defines the problem, including the state space, action space, degradation dynamics, and cost structure. Section~\ref{sec:methodology} presents the solution methodology. Section~\ref{sec:experiments} reports computational experiments on two case studies, comparing the proposed approach against benchmark methods. Section~\ref{sec:conclusion} summarizes the findings and discusses directions for future research.
+
+\section{Literature Review}
+\label{sec:literature}
+
+The network-level MR\&R scheduling problem sits at the intersection of four research streams: infrastructure maintenance optimization, stochastic degradation modeling, large-scale sequential decision-making under uncertainty, and traffic network analysis. We review each in turn and close by identifying the gap this paper addresses.
+
+\subsection{Infrastructure Maintenance Optimization and Traffic Network Effects}
+
+Maintenance optimization for civil infrastructure has a long history in operations research and transportation engineering. Early models focused on single assets, balancing inspection and repair costs against failure risk using classical reliability theory and Markov chain models \citep{frangopol_probabilistic_2004, robelin_history-dependent_2007}. Network-level extensions---in which the condition and maintenance decisions of multiple assets must be coordinated---introduce a combinatorial explosion of feasible schedules and interdependencies among assets through shared budgets, maintenance crews, and network-wide traffic redistribution.
+
+A prominent class of network-level approaches embeds traffic impacts in a bi-level program: an upper-level scheduler selects which assets to renovate, while a lower-level Traffic Assignment Problem (TAP) determines the resulting user-equilibrium flows and travel-time costs \citep{ngOptimalLongTermInfrastructure2009}. When a road segment or bridge is closed for renovation, traffic redistributes over alternative routes according to a user equilibrium, increasing congestion and travel time across the network. Because this redistribution is non-additive---simultaneous capacity reductions on parallel routes cause disproportionately greater delays than the sum of their individual effects---maintenance decisions cannot be evaluated in isolation. Metaheuristics such as genetic algorithms and simulated annealing are commonly used to search the combinatorial upper-level action space, since the inner TAP renders the problem too costly for exact branch-and-bound methods \citep{ngOptimalLongTermInfrastructure2009, ouyangPavementResurfacingPlanning2007}.
+
+The computational burden of the TAP evaluation means that this class of models is almost exclusively applied in a static setting: degradation is treated as deterministic, and the scheduling problem is solved once over the planning horizon rather than as a sequential decision problem under uncertainty. Recent work has begun to address this limitation by incorporating stochastic degradation and multi-stage decision-making \citep{andriotis_managing_2019, vanremmerdenDeepMultiobjectiveReinforcement2025}, but these approaches do not capture traffic redistribution effects, leaving the integration of dynamic optimization with realistic traffic impacts an open problem.
+
+In the present paper, the TAP is solved at each decision epoch to determine user-equilibrium flows, which enter the cost function as extra vehicle-hours relative to a baseline (Section~\ref{subsec:objective}). Because the TAP must be evaluated thousands of times across scheduling alternatives and planning episodes, directly solving it at every step creates a significant computational burden. \citet{boschMachineLearningPredictions2025} investigate machine learning surrogate models as a means to approximate individual TAP outcomes: given a vector encoding which road segments are under capacity reduction, the surrogate predicts the resulting network-wide congestion without solving the full equilibrium problem.
+
+\subsection{Degradation Modeling}
+
+Accurate modeling of asset deterioration is central to any maintenance optimization framework. The Wiener process with drift is widely used in the maintenance and degradation literature because its drift and volatility parameters can straightforwardly accommodate usage-dependent variables such as traffic flow \citep{van_noortwijk_survey_2009}. However, the Wiener process is non-monotonic and allows for spurious ``self-healing'' sample paths, which can be at odds with the physical reality of irreversible structural damage \citep{zhangOptimalConditionbasedMaintenance2024}.
+
+An alternative class of degradation models is based on discrete-state Markov chains, in which an asset's condition is represented by a finite set of condition states (e.g., excellent, good, fair, poor, failed) and transitions between states occur according to a transition probability matrix estimated from historical inspection records \citep{frangopol_probabilistic_2004}. Markov chain models are computationally tractable and have been widely adopted in bridge and pavement management systems, in part because their discrete structure aligns naturally with the coarse condition ratings collected during field inspections. Their main limitation is the loss of resolution inherent in discretizing a continuous deterioration process: small incremental changes in structural condition cannot be represented until they cross a state boundary, and the memoryless (Markov) property can be unrealistic for assets whose future deterioration rate depends on their accumulated damage history.
+
+For processes in which deterioration is strictly accumulative---such as fatigue crack growth, wear, or corrosion---continuous monotone stochastic processes are more appropriate. The Gamma process is a natural candidate: it has strictly non-negative increments, so the modeled condition can only worsen over time, and its parameters can be estimated from inspection data using maximum likelihood \citep{wangConstructionOptimizationClosed2021}. The Inverse Gaussian process shares similar monotonicity properties and has been advocated for cases where degradation exhibits heavier-tailed increments \citep{ye_inverse_2014}. Both have been applied to bridge and pavement deterioration, though integration with network-level optimization remains rare.
+
+Usage-dependent degradation, in which traffic loading accelerates deterioration, has received growing attention \citep{van_noortwijk_survey_2009}. In the present paper, we adopt a Gamma process with a load-dependent shape rate (Section~\ref{subsec:degradation}). The Gamma process is preferred over the Wiener process because it enforces strict monotonicity---matching the physical reality of irreversible structural deterioration---while remaining analytically tractable and admitting straightforward maximum-likelihood estimation from inspection records. Unlike the Wiener process, it does not produce self-healing sample paths, and its non-negative increments ensure that the condition variable $d_i^t$ increases monotonically between maintenance interventions.
+
+\subsection{Sequential Decision-Making and Reinforcement Learning for Maintenance}
+
+Formulating network-level maintenance as a Markov Decision Process (MDP) provides a principled framework for sequential decision-making under stochastic degradation. The Bellman optimality equations, however, cannot be solved exactly for large, continuous state spaces, motivating reinforcement learning approaches that approximate either the value function or the policy directly \citep{andriotis_managing_2019}.
+
+A central challenge is the \emph{curse of dimensionality} in the joint action space: with even a modest number of action choices per asset, the number of feasible joint actions grows exponentially in the number of assets. The literature has responded with several strategies:
+
+\begin{enumerate}
+    \item \textbf{Factorized representations.} Algorithms such as the Deep Centralized Multi-agent Actor Critic (DCMAC) assume that individual component actions are conditionally independent given the system state, allowing the actor network to produce a factorized probability distribution that scales linearly rather than exponentially with the number of assets \citep{andriotis_managing_2019}. This scales well to large asset portfolios, but the conditional independence assumption can be violated when assets share road corridors, potentially degrading policy quality in highly interconnected networks.
+
+    \item \textbf{Sequential and decomposed action selection.} A broad class of methods avoids enumerating the joint action space by selecting or evaluating actions for individual assets one at a time, using the choices already committed to as context for subsequent decisions. Neural network architectures that process assets sequentially update the shared state after each asset's action is fixed; \citet{verleijsdonkScalablePoliciesDynamic2024} adopt a fixed processing order for engineers in the K-DTMPA setting. Neighborhood local search similarly evaluates only $O(N)$ single-asset deviations from a candidate joint action, iterating until no improving neighbor exists; this makes each decision step tractable while still capturing interaction effects. Both approaches naturally condition each asset's decision on what has been decided for others, but introduce an $O(N)$ sequential factor per epoch and can be sensitive to the starting solution or processing order. Whether optimizing or learning the processing order---analogous to construction order in neural combinatorial optimization---could reduce the ordering asymmetry in maintenance scheduling remains an open question.
+
+    \item \textbf{Hierarchical decomposition with LP projection.} When a global budget constraint couples all asset decisions simultaneously, a hierarchical structure can separate a high-level budget planner from a low-level priority scorer. The continuous priority scores are then projected onto feasible discrete actions through a binary knapsack linear program, keeping the action dimension linear while respecting the budget constraint \citep{fard_hierarchical_2025}. This produces feasible solutions by design and decouples learning from constraint satisfaction, though the LP projection adds overhead and the two-level structure may sacrifice optimality when priority scores and budget allocation interact in ways the hierarchy cannot capture.
+
+    \item \textbf{Action space truncation via control limits.} Heuristic restrictions---such as preventing renovation of assets below a condition threshold---can sharply reduce the combinatorial branching factor without substantially sacrificing solution quality \citep{verleijsdonkMaintenanceOptimizationAsset2025}. The approach is simple to implement and often highly effective, since obviously dominated actions are eliminated at negligible computational cost. Its risk is that truncation rules specified apriori may inadvertently exclude globally beneficial actions that violate locally reasonable heuristics---for example, early preventive renovation of a strategically important asset.
+\end{enumerate}
+
+In the present paper, we address the exponential action space through three complementary action generation mechanisms within the DQN framework---neighborhood local search, sequential per-asset selection, and Branching Dueling Q-Networks (Section~\ref{subsubsec:action_generation})---all of which fall under the sequential and decomposed action selection class and together avoid full enumeration without requiring a factorized independence assumption that may not hold when assets share road corridors. We additionally evaluate Proximal Policy Optimization (PPO) as a direct policy approach, which falls under the policy function approximation class.
+
+
+\subsection{Timing of Decision Epochs}
+\label{subsec:epochs}
+
+We adopt a discrete-time formulation with fixed decision epochs of length $\Delta t$. The epoch length is a study-level parameter: it should be short enough to capture construction delays and renovation completions faithfully, yet long enough to avoid superfluous decision epochs in which no meaningful change in asset condition occurs. At each epoch, degradation increments are drawn from the Gamma process, renovation progress is updated according to the Wiener process, and maintenance decisions are made for all assets simultaneously.
+
+This fixed-epoch approach has well-defined Markov structure: because both the Gamma and Wiener processes have independent, distributable increments over any fixed interval, the epoch-boundary states satisfy the Markov property without requiring event-driven triggers. The alternative---a semi-Markov formulation in which epoch lengths vary with the time of each renovation completion---avoids approximation error in timing but introduces substantial coordination complexity: renovation completions for different assets occur at different times, so there is no natural shared clock for system-wide decisions.
+
+In practice, renovations complete at some point within an epoch; we model completion as occurring at the epoch boundary when $h_i^{t+1} \leq 0$. When epochs are short relative to typical renovation durations, this discretization error is small. The fixed-epoch MDP is therefore the appropriate formulation for the present paper.
+
+
+\subsection{Stochastic Maintenance Durations}
+
+While uncertainty in asset degradation has been studied extensively, uncertainty in the \emph{duration} of maintenance activities has received comparatively little attention. The vast majority of existing MR\&R models treat renovation and repair durations as deterministic, typically assuming that each maintenance action completes within a single planning period \citep{ngOptimalLongTermInfrastructure2009, andriotis_managing_2019}. This assumption is particularly consequential in network settings. Within a single renovation project, activities are organized according to a critical path: groundwork, structural intervention, and surfacing must proceed in sequence, so any disruption on this critical path propagates fully to the project completion date. Disruptions affecting non-critical sub-tasks are absorbed by their scheduling float until that float is exhausted, at which point they too cascade to the completion date. Across the road network, an unexpectedly prolonged renovation therefore extends the period of capacity reduction on adjacent edges, propagating congestion and potentially displacing the start dates of downstream projects scheduled to begin once the current work zone is cleared.
+
+To our knowledge, no existing work explicitly models stochastic maintenance durations in a network-level MDP formulation that simultaneously captures traffic redistribution effects. We address this gap by representing renovation progress as a Wiener process with drift. Nominal progress advances at rate $\mu^h$ per unit time, while stochastic fluctuations---reflecting random delays from adverse weather, supply shortages, and unforeseen ground conditions---are captured by a diffusion term with volatility $\sigma^h$ \citep{vazquez_activity_2024}. The completion time (i.e., the first passage time of the process to zero) follows an \emph{inverse Gaussian distribution}, which has a closed-form density and admits straightforward maximum-likelihood estimation from historical project duration records. Note that renovation progress is modelled separately from asset degradation: while asset condition evolves as a monotone Gamma process (Section~\ref{subsec:degradation}), renovation duration follows a Wiener process whose parameters ($\mu^h$, $\sigma^h$) can be estimated from historical project records.
+
+\subsection{Positioning of this Paper}
+
+The preceding review reveals a consistent fragmentation in the literature: models that handle stochastic degradation typically omit traffic effects; models with realistic traffic assignment treat degradation deterministically; and models that address the curse of dimensionality rarely incorporate more than two action types per asset or acknowledge uncertainty in maintenance durations. This paper bridges these gaps by developing a finite-horizon MDP formulation that simultaneously accounts for (i) monotone stochastic degradation via a Gamma process with load-dependent shape rate, (ii) uncertain renovation durations modeled via a Wiener process with drift, (iii) four action types including load restrictions as deliberate degradation-slowing interventions, and (iv) network-wide traffic redistribution evaluated through a Traffic Assignment Problem at each epoch. Solution methods spanning heuristic baselines, Deep Q-Networks with regression and ranking value function approximators, and several extensions are developed and compared on synthetic and real-world case studies.
+
+\section{Problem Description}
+\label{sec:problem}
+
+This section formally defines the infrastructure renovation scheduling problem as a Markov Decision Process (MDP). The core challenge is to determine, at each point in time, which assets in the network to renovate, repair, or place under load restriction, given that asset conditions deteriorate stochastically, renovation activities disrupt traffic network flows, and resources are shared across all assets. Decisions must be made sequentially under uncertainty, balancing the costs of proactive intervention against the risks of reactive emergency repairs and prolonged disruption. We first describe the transportation network and its assets (Section~\ref{subsec:network}), then present the degradation and renovation duration models (Section~\ref{subsec:degradation}), followed by the action space (Section~\ref{subsec:actions}), the traffic impact model (Section~\ref{subsec:traffic}), and finally the cost structure and objective (Section~\ref{subsec:objective}). Table~\ref{tab:notation} summarizes the key notation used throughout the paper.
+
+\begin{table*}[htpb]
+\centering
+\caption{Summary of notation.}
+\label{tab:notation}
+\small
+\begin{tabular}{ll}
+\hline
+\textbf{Symbol} & \textbf{Description} \\
+\hline
+\multicolumn{2}{l}{\textit{Network and indexing}} \\
+$\mathcal{G} = (\mathcal{N}, \mathcal{E})$ & Transportation network with nodes $\mathcal{N}$ and edges $\mathcal{E}$ \\
+$\mathcal{I} \subseteq \mathcal{E}$ & Set of infrastructure assets subject to maintenance \\
+$N$ & Number of assets, $N = |\mathcal{I}|$ \\
+$i$ & Asset index, $i \in \{1, \ldots, N\}$ \\
+$t$ & Decision epoch (discrete time step) \\
+$T$ & Planning horizon (number of decision epochs) \\
+\hline
+\multicolumn{2}{l}{\textit{State variables}} \\
+$d_i^t$ & Condition level of asset $i$ at time $t$, $d_i^t \in [0, 1]$ \\
+$h_i^t$ & Normalized remaining work for asset $i$ at time $t$; initialized at 1, renovation complete when $h_i^t \leq 0$ \\
+$\ell_i^t$ & Load restriction indicator for asset $i$ at time $t$, $\ell_i^t \in \{0, 1\}$ \\
+$r_i^t$ & Repair-used indicator for asset $i$ at time $t$, $r_i^t \in \{0, 1\}$ \\
+$n_i^t$ & Consecutive failed steps for asset $i$ at time $t$ \\
+$S_t$ & System state at time $t$ \\
+\hline
+\multicolumn{2}{l}{\textit{Degradation model}} \\
+$\alpha_i^0$ & Baseline shape rate for asset $i$ \\
+$\beta_i$ & Rate parameter (inverse scale) for asset $i$ \\
+$G_i(t)$ & Gamma process for asset $i$ \\
+$f_i^t$ & Traffic flow on asset $i$ at time $t$ \\
+$\Delta t$ & Decision epoch length (time step size) \\
+\hline
+\multicolumn{2}{l}{\textit{Renovation duration model}} \\
+$\mu_i^h$ & Per-asset nominal progress rate (drift) \\
+$\sigma_i^h$ & Per-asset progress volatility \\
+\hline
+\multicolumn{2}{l}{\textit{Actions and maintenance}} \\
+$a_i^t$ & Action applied to asset $i$ at time $t$ \\
+$A_t$ & Joint action vector at time $t$ \\
+$\mathcal{A}_i(S_t)$ & Feasible action set for asset $i$ given state $S_t$ \\
+$\delta$ & Repair improvement amount \\
+\hline
+\multicolumn{2}{l}{\textit{Capacity and traffic}} \\
+$c_e$ & Nominal capacity of edge $e \in \mathcal{E}$ \\
+$\bar{c}_e^t$ & Effective capacity of edge $e$ at time $t$ \\
+$\eta^{\text{ren}}$ & Capacity reduction factor during renovation \\
+$\eta^{\text{load}}$ & Capacity reduction factor under load restriction \\
+$f_{\text{degrad}}$ & Degradation rate multiplier under load restriction ($\in [0,1]$); $f_{\text{degrad}} = 1$ means no effect \\
+$\tau_e^0$ & Free-flow travel time on edge $e$ \\
+$\beta_{\text{BPR}},\, \nu$ & BPR travel time function calibration parameters \\
+\hline
+\multicolumn{2}{l}{\textit{Objective}} \\
+$\gamma$ & Discount factor, $\gamma \in (0, 1)$ \\
+$d^{\text{fail}}$ & Failure threshold \\
+$L_i$ & Physical length of asset $i$ (metres) \\
+$r_{\text{base}}$ & Base risk rate (euros per metre per year per failure step) \\
+$\nu_{\text{vot}}$ & Value of time (euros per vehicle-hour) \\
+$B_{\text{travel}}$ & Baseline total travel time under nominal capacities \\
+$C(S_t, A_t)$ & Cost incurred at time $t$ \\
+$\pi$ & Maintenance policy, $\pi: \mathcal{S} \rightarrow \mathcal{A}$ \\
+\hline
+\end{tabular}
+\end{table*}
+
+\subsection{Network and Assets}
+\label{subsec:network}
+
+Consider a transportation network represented as a directed graph $\mathcal{G} = (\mathcal{N}, \mathcal{E})$, where $\mathcal{N}$ denotes the set of nodes (intersections) and $\mathcal{E}$ the set of directed edges (road segments). A subset $\mathcal{I} \subseteq \mathcal{E}$ of $N = |\mathcal{I}|$ edges represents the infrastructure assets subject to maintenance decisions, such as bridges, tunnels, or deterioration-prone road segments. Each edge $e \in \mathcal{E}$ has a nominal capacity $c_e$ representing its maximum throughput under normal operating conditions.
+
+Time is discretized into decision epochs $t \in \{0, 1, \ldots, T\}$ over a finite planning horizon of $T$ epochs, where each epoch represents half a year. At each epoch, the decision-maker observes the system state and selects maintenance actions for all assets.
+
+\subsection{State Space}
+\label{subsec:state}
+
+The system state at time $t$ is defined as:
+\begin{equation}
+    S_t = \big( \mathbf{d}^t,\, \mathbf{h}^t,\, \boldsymbol{\ell}^t,\, \mathbf{r}^t,\, \mathbf{n}^t \big),
+    \label{eq:state}
+\end{equation}
+where $\mathbf{d}^t = (d_1^t, \ldots, d_N^t)$, $\mathbf{h}^t = (h_1^t, \ldots, h_N^t)$, $\boldsymbol{\ell}^t = (\ell_1^t, \ldots, \ell_N^t)$, $\mathbf{r}^t = (r_1^t, \ldots, r_N^t)$, and $\mathbf{n}^t = (n_1^t, \ldots, n_N^t)$ are vectors collecting the per-asset state variables. For each asset $i$:
+
+\begin{itemize}
+    \item \textbf{Condition level} $d_i^t \in [0, 1]$ quantifies the degree of deterioration: $d_i^t = 0$ indicates a pristine state and $d_i^t = 1$ indicates critical failure. The condition evolves stochastically according to the degradation model defined in Section~\ref{subsec:degradation}.
+
+    \item \textbf{Normalized remaining work} $h_i^t$ represents the fraction of renovation work still to be completed on asset $i$. It is initialized at $h_i^t = 1$ when a renovation begins; in discrete time, work progress can overshoot and $h_i^t$ may fall below zero, at which point the renovation is considered complete and $h_i^t$ is reset to 0. When $h_i^t > 0$, asset $i$ is under active renovation and its adjacent road capacity is reduced. This variable evolves stochastically as described in Section~\ref{subsec:degradation}.
+
+    \item \textbf{Load restriction indicator} $\ell_i^t \in \{0, 1\}$ equals 1 if a load restriction is currently in effect on asset $i$, and 0 otherwise. A load restriction reduces both road capacity and the rate of degradation.
+
+    \item \textbf{Repair-used indicator} $r_i^t \in \{0, 1\}$ equals 1 if a minor repair has already been performed on asset $i$ since its last renovation, and 0 otherwise. This prevents repeated patching in lieu of full rehabilitation.
+
+    \item \textbf{Consecutive-failure counter} $n_i^t \in \mathbb{Z}_{\geq 0}$ counts the number of consecutive decision epochs in which asset $i$ has been in a failed state ($d_i^t \geq d^{\text{fail}}$). It is incremented each epoch that an asset remains failed and reset to zero when the asset is no longer in a failed state or is actively being addressed: (i) a renovation completed and reset $d_i \leftarrow 0$; (ii) a repair reduced $d_i$ below $d^{\text{fail}}$; or (iii) a renovation was initiated and is in progress ($h_i^t > 0$), at which point the asset is under active rehabilitation and no longer accumulates unaddressed risk. This counter supports the escalating risk cost defined in Section~\ref{subsec:objective}.
+\end{itemize}
+
+\subsection{Degradation and Renovation Duration Models}
+\label{subsec:degradation}
+
+\subsubsection{Asset Degradation}
+
+The condition of each asset evolves according to a Gamma process with a load-dependent shape rate. Let $d_i^t$ denote the condition level of asset $i$ at time $t$. Between consecutive decision epochs, the condition increment is drawn from a Gamma distribution:
+\begin{equation}
+    d_i^{t+1} = d_i^t + \Delta G_i^t, \qquad \Delta G_i^t \sim \mathrm{Gamma}\!\left(\alpha_i(\ell_i^t)\,\Delta t,\; \beta_i\right),
+    \label{eq:degradation}
+\end{equation}
+where $\Delta t$ is the time step length, $\beta_i > 0$ is the rate parameter (inverse scale) governing the magnitude of individual increments, and $\alpha_i(\ell_i^t) > 0$ is the shape rate capturing intrinsic material deterioration modulated by load restrictions. Degradation is suppressed while asset $i$ is under active renovation ($h_i^t > 0$): in that case $d_i^{t+1} = d_i^t$, reflecting that ongoing construction works prevent further structural deterioration. Using the shape--rate parameterization, the expected increment is $\mathbb{E}[\Delta G_i^t] = \alpha_i(\ell_i^t)\,\Delta t \,/\, \beta_i$ and its variance is $\alpha_i(\ell_i^t)\,\Delta t \,/\, \beta_i^2$.
+
+The load-dependent shape rate is:
+\begin{equation}
+    \alpha_i(\ell_i^t) = \big(1 - (1 - f_{\text{degrad}})\,\ell_i^t\big)\,\alpha_i^0,
+    \label{eq:shape_rate}
+\end{equation}
+where $\alpha_i^0 > 0$ is the baseline shape rate and $f_{\text{degrad}} \in [0,1]$ is a configurable degradation rate multiplier under load restriction. When a load restriction is active ($\ell_i^t = 1$), the effective shape rate is scaled by $f_{\text{degrad}}$: $f_{\text{degrad}} = 0$ fully stops degradation, $f_{\text{degrad}} = 1$ leaves it unchanged. The experimental value $f_{\text{degrad}} = 0.9$ yields a modest 10\% reduction, reflecting that load restrictions primarily limit further damage accumulation but do not halt the underlying deterioration mechanism. Because the Gamma distribution has strictly positive support, all increments $\Delta G_i^t > 0$, so the condition variable $d_i^t$ increases monotonically between maintenance interventions---consistent with the physical irreversibility of structural deterioration. The condition is bounded above at 1 by applying a ceiling: $d_i^{t+1} = \min(1,\, d_i^t + \Delta G_i^t)$.
+
+The Gamma process is well-suited for modeling infrastructure degradation because it enforces monotone deterioration (no spurious self-healing), admits flexible shapes including both approximately linear and increasingly rapid deterioration regimes depending on the parameter values, and allows straightforward parameter estimation from inspection records via maximum likelihood \citep{van_noortwijk_survey_2009, wangConstructionOptimizationClosed2021}.
+
+\subsubsection{Renovation Duration}
+
+We model renovation duration as a stochastic process to capture the inherent uncertainty in construction timelines. When a renovation is initiated on asset $i$, the remaining work is initialized at $h_i^t = 1$ and the renovation completes when $h_i^t \leq 0$. Between consecutive epochs, remaining work evolves according to a Wiener process with drift:
+\begin{equation}
+    h_i^{t+1} = h_i^t - \mu_i^h \, \Delta t + \sigma_i^h \sqrt{\Delta t} \, \varepsilon_i^t,
+    \label{eq:renovation_duration}
+\end{equation}
+where $\mu_i^h > 0$ is the nominal progress rate for asset $i$, $\sigma_i^h \geq 0$ is the volatility capturing random delays and speedups, and $\varepsilon_i^t \sim \mathcal{N}(0, 1)$ are i.i.d.\ standard normal shocks, independent across assets and time steps and independent of the degradation increments $\Delta G_i^t$. Both parameters are asset-specific: $\mu_i^h = 1/e_i^{\text{ren}}$, where the expected renovation duration $e_i^{\text{ren}}$ grows with asset length $L_i$, and $\sigma_i^h$ scales proportionally to $\mu_i^h$. The renovation completes at the first epoch boundary where $h_i^{t+1} \leq 0$; since continuous renovations finish at some point within an epoch, this boundary detection is a discrete approximation that is accurate when $\Delta t$ is small relative to the expected renovation duration. The first passage time of the continuous process to zero follows an \emph{inverse Gaussian distribution} with mean $1/\mu_i^h$ and shape parameter $(\mu_i^h)^2/(\sigma_i^h)^2$, which provides a closed-form basis for parameter estimation (Section~\ref{subsubsec:param_est}).
+
+Upon completion of a renovation ($h_i^t \leq 0$), the condition is reset to pristine: $d_i^t \leftarrow 0$, any active load restriction is lifted: $\ell_i^t \leftarrow 0$, and the repair-used indicator is reset: $r_i^t \leftarrow 0$. This is the only mechanism through which a load restriction can be removed.
+
+\subsubsection{Parameter Estimation and Tuning}
+
+The Gamma process degradation model for each asset $i$ involves two parameters: the baseline shape rate $\alpha_i^0$ and the rate parameter $\beta_i$. In practice, these can be calibrated from inspection records using maximum likelihood estimation (MLE). Given a sequence of $M$ observed condition increments $\{\Delta d_i^1, \ldots, \Delta d_i^M\}$, the log-likelihood under the Gamma model is:
+\begin{equation}
+    \mathcal{L}(\alpha_i^0, \beta_i) = \sum_{t=1}^{M} \log p\!\left(\Delta d_i^t \;\middle|\; \mathrm{Gamma}\!\left(\alpha_i(\ell_i^t)\,\Delta t,\, \beta_i\right)\right),
+\end{equation}
+which can be maximized numerically using standard solvers (e.g., L-BFGS-B). When inspection data are sparse, Bayesian estimation with weakly informative priors (e.g., half-normal prior on $\alpha_i^0$, Gamma prior on $\beta_i$) provides regularization and quantifies parameter uncertainty \citep{van_noortwijk_survey_2009}.
+
+For the renovation duration model, the two parameters $\mu^h$ and $\sigma^h$ in~\eqref{eq:renovation_duration} can be estimated from historical renovation project records. Because the first passage time of the continuous Wiener process to zero follows an inverse Gaussian distribution, $\mu^h$ and $\sigma^h$ can be estimated by maximum likelihood directly from a sample of observed total project durations, with no need for event-level records. The nominal progress rate $\mu^h$ can alternatively be read off directly from the planned project schedule as the reciprocal of the planned duration. The load restriction capacity reduction fractions $\eta^{\text{ren}}$ and $\eta^{\text{load}}$ are policy parameters set by the infrastructure manager and can be tuned through experts or sensitivity analysis.
+
+\subsection{Action Space}
+\label{subsec:actions}
+
+At each decision epoch $t$, the decision-maker selects a joint action $A_t = (a_1^t, \ldots, a_N^t)$, where $a_i^t \in \mathcal{A}_i(S_t)$ is the action applied to asset $i$. The action set for each asset depends on its current state:
+\begin{equation}
+    a_i^t \in \{\textsf{none},\; \textsf{repair},\; \textsf{renovate},\; \textsf{restrict}\},
+    \label{eq:actions}
+\end{equation}
+subject to the feasibility constraints detailed below. 
+
+\begin{enumerate}
+    \item \textbf{Do nothing} (\textsf{none}): No intervention is performed. The asset continues to degrade according to~\eqref{eq:degradation}.
+
+    \item \textbf{Minor repair} (\textsf{repair}): A partial restoration that reduces the condition level by a fixed amount $\delta$:
+    \begin{equation}
+        d_i^t \leftarrow \max\big(0, \, d_i^t - \delta\big).
+        \label{eq:repair}
+    \end{equation}
+    A minor repair is available only if the asset is not under renovation ($h_i^t \leq 0$). To prevent indefinite deferral of full renovation through repeated patching—and to reflect the practical reality that temporary measures cannot substitute for structural rehabilitation—each asset is limited to \emph{at most one repair between consecutive renovations}. This is tracked by a binary indicator $r_i^t \in \{0, 1\}$, where $r_i^t = 1$ means a repair has already been performed since the last renovation. A repair is only feasible if $r_i^t = 0$; upon performing a repair, $r_i^t$ is set to 1 and remains so until the next renovation resets it to 0. Minor repairs represent preventive maintenance activities such as crack sealing, patching, or thin overlays. While such activities do require work zones in practice, their duration is negligible relative to the decision epoch length and they are therefore modeled as instantaneous interventions that do not reduce road capacity.
+
+    \item \textbf{Full renovation} (\textsf{renovate}): A complete restoration that resets the condition to pristine upon completion. Initiating a renovation sets $h_i^t \leftarrow 1$ and triggers a capacity reduction on adjacent road segments. A renovation can only be initiated if the asset is not already under renovation ($h_i^t \leq 0$). If a load restriction was in effect prior to renovation ($\ell_i^t = 1$), it remains active during the renovation and is lifted upon completion.
+
+    \item \textbf{Impose load restriction} (\textsf{restrict}): A deliberate decision to limit traffic on the asset by setting $\ell_i^t \leftarrow 1$. This is only available when no restriction is active ($\ell_i^t = 0$) and no renovation is in progress ($h_i^t \leq 0$). Once imposed, a load restriction remains in effect until a renovation is initiated and subsequently completed; it cannot be lifted independently. This reflects the practical reality that load restrictions are typically imposed on assets whose structural condition warrants reduced usage until full rehabilitation can be undertaken.
+\end{enumerate}
+
+The feasible action set $\mathcal{A}_i(S_t)$ for asset $i$ is thus state-dependent. If an asset is currently under renovation ($h_i^t > 0$), the only feasible action is \textsf{none}, as the renovation proceeds until completion. The full set of feasibility constraints is summarized in Table~\ref{tab:action_feasibility}.
+
+\begin{table}[htpb]
+\centering
+\caption{Action feasibility constraints. An action is available ($\checkmark$) only if all conditions are met.}
+\label{tab:action_feasibility}
+\small
+\begin{tabular}{lccc}
+\hline
+\textbf{Action} & $h_i^t \leq 0$ & $\ell_i^t$ & $r_i^t$ \\
+\hline
+\textsf{none}       & --           & -- & -- \\
+\textsf{repair}     & $\checkmark$ & -- & $= 0$ \\
+\textsf{renovate}   & $\checkmark$ & -- & -- \\
+\textsf{restrict}   & $\checkmark$ & $= 0$ & -- \\
+\hline
+\end{tabular}
+\end{table}
+
+
+\subsection{Traffic Impact Model}
+\label{subsec:traffic}
+
+Maintenance activities and load restrictions alter the effective capacity of network edges, which in turn affects route choices and travel times throughout the network. The effective capacity of each edge $e \in \mathcal{E}$ at time $t$ is:
+\begin{equation}
+    \bar{c}_e^t = 
+    \begin{cases}
+        \eta^{\text{ren}} \cdot c_e & \text{if } e \in \mathcal{I} \text{ and } h_e^t > 0, \\
+        \eta^{\text{load}} \cdot c_e & \text{if } e \in \mathcal{I} \text{ and } \ell_e^t = 1, \\
+        c_e & \text{otherwise},
+    \end{cases}
+    \label{eq:capacity}
+\end{equation}
+where $\eta^{\text{ren}} = 0.05$ corresponds to a 95\% capacity reduction during renovation and $\eta^{\text{load}} = 0.40$ corresponds to a 40\% reduction under load restrictions. Here $h_e^t$ and $\ell_e^t$ denote the remaining renovation work and load restriction indicator, respectively, for the asset $i \in \mathcal{I}$ whose corresponding edge is $e$; edges not in $\mathcal{I}$ are unaffected. When an asset is simultaneously under renovation and subject to a pre-existing load restriction, the renovation capacity reduction takes precedence (i.e., the more restrictive reduction applies).
+
+Given the vector of effective capacities $\bar{\mathbf{c}}^t$, the network traffic flows are determined by solving the Traffic Assignment Problem (TAP). The TAP seeks a user equilibrium in which no traveler can reduce their travel time by unilaterally switching routes. Let $\mathbf{D}$ denote the origin-destination demand matrix (assumed constant over the planning horizon). The user equilibrium flow pattern $\mathbf{f}^t = (f_e^t)_{e \in \mathcal{E}}$ is the solution to the Beckmann formulation \citep{beckmannStudiesEconomicsTransportation1956}:
+\begin{equation}
+    \mathbf{f}^t = \arg\min_{\mathbf{f} \geq \mathbf{0}} \sum_{e \in \mathcal{E}} \int_0^{f_e} \tau_e(x, \bar{c}_e^t) \, dx
+    \label{eq:TAP}
+\end{equation}
+subject to flow conservation and demand satisfaction constraints, where $\tau_e(f_e, \bar{c}_e^t)$ is the travel time function on edge $e$. Following the Bureau of Public Roads (BPR) formulation:
+\begin{equation}
+    \tau_e(f_e, \bar{c}_e^t) = \tau_e^0 \left( 1 + \beta_{\text{BPR}} \left( \frac{f_e}{\bar{c}_e^t} \right)^\nu \right),
+    \label{eq:BPR}
+\end{equation}
+where $\tau_e^0$ is the free-flow travel time, and $\beta_{\text{BPR}}, \nu > 0$ are calibration parameters.
+
+The TAP is solved at each decision epoch to obtain the equilibrium flows $\mathbf{f}^t$, which enter the cost function as extra vehicle-hours relative to the baseline (Section~\ref{subsec:objective}).
+
+\subsection{Cost Structure and Objective}
+\label{subsec:objective}
+
+The problem is formulated as a \emph{finite-horizon Markov Decision Process} (MDP) defined by the tuple $(\mathcal{S}, \mathcal{A}, P, C, \gamma, T)$, where $\mathcal{S}$ is the state space defined in~\eqref{eq:state}, $\mathcal{A} = \prod_{i=1}^{N} \mathcal{A}_i$ is the joint action space, $P(S_{t+1} \mid S_t, A_t)$ is the state transition kernel induced by the degradation~\eqref{eq:degradation} and renovation duration~\eqref{eq:renovation_duration} models, $C(S_t, A_t)$ is the single-period cost function, $\gamma \in (0, 1)$ is the discount factor, and $T$ is the planning horizon.
+
+A finite planning horizon directly reflects the reality of infrastructure asset management. Planning and budgeting cycles are bounded: asset managers optimize over a concrete multi-year commitment window, not a stationary infinite future. Equally importantly, the environment is non-stationary: traffic demand patterns, urbanization trajectories, policy priorities, and climate-related deterioration rates evolve over time in ways that an infinite-horizon stationarity assumption cannot capture. For the Amsterdam quay wall portfolio that motivates this paper, renovation decisions taken today affect the structural condition of assets whose designed service life after full renovation is approximately 120 years; an infinite-horizon formulation would imply that current traffic volumes and deterioration rates remain unchanged over this entire period, which is plainly unrealistic.
+
+The principal challenge with a finite horizon is the \emph{end-of-horizon effect}: an agent that knows costs stop at time $T$ has diminishing incentive to invest in assets whose benefits accrue beyond $T$. For assets with a 120-year service life, a policy optimized over a 60-year horizon without any terminal correction would allow severe deterioration in the final decades, since renovation costs incurred near $T$ yield structural benefits that extend far beyond the horizon. A pure finite-horizon solution without terminal correction would require the MDP to span at least $T + 120$ years for end-of-horizon effects to be negligible.
+
+In practice, we address this through \emph{bootstrapped truncation}: at the end of each training episode the terminal cost target is augmented by $\gamma^T \hat{V}(S_T; \theta)$, where $\hat{V}$ is the current value function estimate. This approximates the expected costs beyond the horizon under the current policy, suppressing end-of-horizon effects without requiring prohibitively long episodes.
+
+The objective is to find a policy $\pi^*$ that minimizes the expected finite-horizon discounted cost:
+\begin{equation}
+    \pi^* = \arg\min_{\pi} \, \mathbb{E} \left[ \sum_{t=0}^{T-1} \gamma^t \, C\big(S_t, \pi(S_t)\big) \right],
+    \label{eq:objective}
+\end{equation}
+where the expectation is taken over the stochastic degradation and renovation duration processes. The policy $\pi: \mathcal{S} \rightarrow \mathcal{A}$ maps system states to joint actions for all assets. Due to the continuous state space, the high-dimensional action space, and the computational cost of solving the TAP at each evaluation, this optimization problem is intractable for exact dynamic programming methods, motivating the reinforcement learning approach presented in Section~\ref{sec:methodology}.
+
+The single-period cost is composed of three terms:
+\begin{equation}
+    C(S_t, A_t) = C^{\text{maint}}(A_t) + C^{\text{travel}}(S_t, A_t) + C^{\text{risk}}(S_t),
+    \label{eq:cost}
+\end{equation}
+where:
+
+\begin{itemize}
+    \item $C^{\text{maint}}(A_t) = \sum_{i=1}^{N} c_i^{a_i^t}$ is the direct maintenance cost, with $c_i^{a_i^t}$ the cost of action $a_i^t$ on asset $i$ (zero for \textsf{none} and \textsf{restrict}).
+
+    \item $C^{\text{travel}}(S_t, A_t) = \nu_{\text{vot}} \cdot
+    \dfrac{\displaystyle\sum_{e \in \mathcal{E}} f_e^t \,\tau_e(f_e^t, \bar{c}_e^t) - B_{\text{travel}}}{60}
+    \cdot \Delta t \cdot 365$
+    is the extra vehicle-hours induced by capacity reductions, converted to euros via the value of time $\nu_{\text{vot}}$ (euros per vehicle-hour). $B_{\text{travel}} = \sum_e f_e^{\text{base}} \tau_e^{\text{base}}$ is the baseline total travel time under nominal capacities (no active projects), pre-computed once on environment initialization. The flows $\mathbf{f}^t$ are obtained from the TAP~\eqref{eq:TAP} under the effective capacities induced by state $S_t$ and actions $A_t$.
+
+    \item $C^{\text{risk}}(S_t) = r_{\text{base}} \cdot \Delta t \cdot
+    \sum_{i=1}^{N} n_i^t \cdot L_i \cdot \mathbf{1}\{d_i^t \geq d^{\text{fail}}\}
+    \cdot \mathbf{1}\{h_i^t = 0\}$
+    is the escalating risk cost for assets in a failed and unaddressed state. Each epoch that asset $i$ remains at or beyond the failure threshold $d^{\text{fail}}$ without an active renovation ($h_i^t = 0$), its counter $n_i^t$ increments, so the risk cost per epoch increases linearly with the duration of unaddressed failure. Assets under active renovation ($h_i^t > 0$) are excluded, as they are being rehabilitated. $r_{\text{base}}$ is the base risk rate (euros per metre per year per failure step) and $L_i$ is the physical length of asset $i$.
+\end{itemize}
+
+\section{Solution Methods}
+\label{sec:methodology}
+
+The MDP formulated in Section~\ref{sec:problem} presents three key challenges for solution algorithms. First, the \emph{joint action space} grows exponentially with the number of assets: with four actions per asset and $N$ assets, the action space has cardinality $|\mathcal{A}| = \prod_{i=1}^{N} |\mathcal{A}_i(S_t)| \leq 4^N$, rendering full enumeration intractable for realistic network sizes. Second, \emph{generating training data is computationally expensive}, as each state transition requires solving a Traffic Assignment Problem~\eqref{eq:TAP}, even when surrogate models are employed to approximate the TAP solution. Third, the \emph{cost distribution is heavily skewed}: travel costs~\eqref{eq:BPR} are a convex, superlinear function of the flow-to-capacity ratio, so capacity reductions during renovation can produce disproportionately large cost spikes when the network is near congestion. This heavy-tailed cost structure complicates value function estimation and slows convergence of learning algorithms.
+
+These challenges jointly constrain the class of viable algorithms. The expensive simulation environment demands sample-efficient methods, the combinatorial action space requires either a tractable action-selection mechanism or a decomposition strategy, and the heavy-tailed costs favor function approximators that do not impose distributional assumptions on the response variable. Following Powell's taxonomy of sequential decision-making policies \citep{noauthor_optimizing_2011}, we develop and compare approaches from multiple policy classes: Policy Function Approximations (heuristic baselines, Section~\ref{subsec:heuristics}), Deep Q-Network variants with different value function models and action generation mechanisms (Section~\ref{subsec:DQN}), a ranking-based value function alternative (Section~\ref{subsec:DQN_rank}), an actor-critic extension (Section~\ref{subsec:DQN_actor}), multi-agent RL with centralized training (Section~\ref{subsec:MARL}), and a Monte Carlo rollout agent that uses a heuristic policy for rollout simulations (Section~\ref{subsec:rollout}).
+
+\subsection{Heuristic Baselines}
+\label{subsec:heuristics}
+
+We consider two heuristic policies that reflect common approaches in infrastructure asset management. Both serve as baselines against which the learning-based methods are evaluated.
+
+\subsubsection{Reactive Renovations}
+
+The reactive renovations heuristic triggers a renovation when an asset's condition exceeds a threshold. For each asset $i$ at time $t$, the policy is:
+\begin{equation}
+    a_i^t = 
+    \begin{cases}
+        \textsf{renovate} & \text{if } d_i^t \geq d^{\text{thr}} \text{ and } h_i^t \leq 0, \\
+        \textsf{none} & \text{otherwise},
+    \end{cases}
+    \label{eq:reactive}
+\end{equation}
+where $d^{\text{thr}} \in (0, d^{\text{fail}})$ is a tunable threshold parameter. This policy is myopic in the sense that it does not anticipate future degradation trajectories, traffic redistribution effects, or the interaction between concurrent renovations. The threshold $d^{\text{thr}}$ is optimized via grid search over simulated episodes.
+
+\subsubsection{Paced Renovations}
+
+The paced renovations heuristic addresses a limitation of the reactive policy: by triggering renovations independently per asset, the reactive heuristic may schedule multiple concurrent renovations that collectively cause severe network congestion. The paced policy instead regulates the \emph{rate} of renovation initiations based on the aggregate workload.
+
+Let $R_i^t$ denote the expected remaining lifespan of asset $i$ at time $t$, estimated from its current condition and the expected condition increment per unit time $\mathbb{E}[\Delta G_i^t]/\Delta t = \alpha_i(\ell_i^t)/\beta_i$ from~\eqref{eq:shape_rate} and~\eqref{eq:degradation}:
+\begin{equation}
+    R_i^t = \frac{d^{\text{thr}} - d_i^t}{\alpha_i(\ell_i^t) / \beta_i}.
+    \label{eq:remaining_life}
+\end{equation}
+The required renovation pace is estimated as the ratio of the time required to renovate all assets to the sum of their expected remaining lifespans $\sum_{i} R_i^t$. At each decision epoch, the policy initiates renovations until the current pace (number of active renovations per unit time) matches the required pace. Among eligible assets, those with the lowest expected remaining lifespan $R_i^t$ are prioritized. This strategy spreads renovations over time to avoid simultaneous capacity reductions on parallel routes.
+
+\subsection{Deep Q-Network (DQN)}
+\label{subsec:DQN}
+
+The DQN approach approximates the optimal value function and uses it to guide action selection. When the value function approximator is a machine learning model---rather than a lookup table or parametric basis function---Approximate Dynamic Programming (ADP) and DQN are structurally identical: both learn $\hat{V}$ or $\hat{Q}$ from sampled transitions via bootstrapped targets and use the learned function to guide action selection. We adopt the DQN label throughout to emphasize this equivalence and to align with the broader deep reinforcement learning literature. The key design choices concern (i) the function approximator used for the value function, and (ii) the mechanism used to generate candidate joint actions given that function.
+
+\subsubsection{Value Function Approximation}
+
+Let $V(S_t)$ denote the optimal cost-to-go from state $S_t$. The Bellman optimality equation for the problem is:
+\begin{equation}
+    V(S_t) = \min_{A_t \in \mathcal{A}} \Big\{ C(S_t, A_t) + \gamma \, \mathbb{E}\big[V(S_{t+1}) \mid S_t, A_t \big] \Big\}.
+    \label{eq:bellman}
+\end{equation}
+Since the continuous state space and expensive transitions preclude exact solution, we approximate $V$ using a parametric model $\hat{V}(S_t; \theta)$.
+
+The state is represented as a feature vector $\phi(S_t) \in \mathbb{R}^{5N+1}$ that concatenates the five per-asset state variables --- condition $d_i^t$, renovation progress $h_i^t$, load restriction $\ell_i^t$, repair-used indicator $r_i^t$, and consecutive-failure counter $n_i^t$ --- together with the normalized epoch index $t/T$ to account for the finite planning horizon. The value function is trained on a dataset $\mathcal{D} = \{(\phi(S_t^{(k)}), \hat{v}^{(k)})\}_{k=1}^{K}$ of state--value pairs collected from simulation, where target values are constructed via one-step bootstrapping using the post-decision state:
+\begin{equation}
+    \hat{v}^{(k)} = C(S_t, A_t) + \gamma \, \hat{V}(S_t^{A}; \theta^-),
+    \label{eq:target}
+\end{equation}
+with $S_t^{A}$ the post-decision state (i.e., the state after the action has been applied but before exogenous stochastic information---degradation increments and renovation progress---is realized) and $\theta^-$ the parameters from the previous training iteration. Using the previous iteration's parameters to construct targets avoids the circularity of training on the model's own predictions.
+
+\paragraph{Model families for the value function.}
+The value function $\hat{V}(S_t; \theta)$ can be realized by several model families, each with different strengths. \emph{Gradient-boosted trees} (XGBoost) are our primary choice: they handle mixed continuous-discrete features without preprocessing, are robust to the heavy-tailed cost distribution~\eqref{eq:BPR} through their non-parametric, piecewise-constant response surface, and offer fast inference. Their main limitation is that they do not generalize smoothly across unseen state regions, which matters when the agent explores parts of the state space not well-represented in $\mathcal{D}$. \emph{Deep neural networks} (multilayer perceptrons or deeper architectures) offer universal approximation and smooth generalization, and scale gracefully as the state feature dimension grows with $N$; they are the natural choice if a rich shared representation across assets is desired. Their drawback is higher sample complexity and sensitivity to hyperparameters, which can be problematic given the expensive simulation environment. A \emph{linear regression} with hand-crafted features (e.g., aggregate condition, number of active renovations, utilization-weighted congestion index) serves as a transparent, analytically interpretable baseline that is trivially fast to train and evaluate. Although its representational capacity is limited, it can perform surprisingly well when the true value function is approximately linear in a small set of aggregate statistics. In practice, XGBoost is preferred as the default; neural networks become attractive when $N$ is large and the state features are high-dimensional, and linear regression is useful as a sanity-check baseline.
+
+\subsubsection{Training Data Management}
+\label{subsubsec:training_data}
+
+Memory constraints limit the training set to a maximum of approximately $K = 200{,}000$ data points for ML models that require an explicit replay buffer (such as XGBoost); beyond this scale, empirical evidence suggests that the marginal benefit of additional samples diminishes as the model approaches the limits of its representational capacity relative to the signal available in the state--cost distribution. As training proceeds and the policy improves, the state distribution shifts, and older data points may become less relevant. We therefore employ an active data management strategy that controls which samples are retained in $\mathcal{D}$ when its capacity is reached. Three strategies are considered:
+
+\begin{enumerate}
+    \item \textbf{FIFO}: The oldest data points are discarded first, following a first-in-first-out discipline.
+    
+    \item \textbf{Lowest-error discard}: The data point with the lowest absolute prediction error $|\hat{v}^{(k)} - \hat{V}(\phi(S^{(k)}); \theta)|$ is discarded, retaining samples that are informative (i.e., where the current model is least accurate).
+    
+    \item \textbf{Stochastic knockout}: Inspired by the leave-one-out influence function framework, which identifies the training points that most reduce loss when removed, this strategy provides a computationally tractable approximation to that ideal. When $x$ data points must be removed, the procedure is carried out over $y$ rounds: in each round, $z$ candidate sets of $x/y$ points are sampled uniformly at random, the model is evaluated with each candidate set removed, and the set whose removal causes the smallest increase in overall prediction loss is discarded. This yields a batch of $x$ removals while limiting the number of model re-evaluations to $y \cdot z$ total across all rounds.
+\end{enumerate}
+
+\subsubsection{Action Generation Strategies}
+\label{subsubsec:action_generation}
+
+Given the learned value function $\hat{V}$, selecting the joint action requires solving the inner minimization of~\eqref{eq:bellman}. With $|\mathcal{A}| \leq 4^N$, exhaustive enumeration is infeasible for large $N$. Three strategies of increasing architectural complexity are considered.
+
+\paragraph{Neighborhood local search.}
+The search starts from the empty action vector $A_t^{(0)} = (\textsf{none}, \ldots, \textsf{none})$ and iteratively perturbs individual asset actions. At each iteration, the algorithm evaluates all neighbors and selects the one with the lowest estimated cost:
+\begin{equation}
+    \hat{Q}(S_t, A_t) = C(S_t, A_t) + \hat{V}'\!\big(S_t^{A};\,\theta\big),
+    \label{eq:approx_Q}
+\end{equation}
+where $S_t^{A}$ is the post-decision state obtained by applying action $A_t$ deterministically (before exogenous degradation and renovation progress are realized). $\hat{V}'$ is trained to predict future-only discounted costs from $S_t^{A}$ onward (targets: $\text{mc\_return} - C(S_t, A_t)$), so current-step costs $C(S_t, A_t)$ are added explicitly. The neighborhood $\mathcal{N}(A_t)$ consists of all vectors that differ from $A_t$ in exactly one component, yielding a neighborhood of size at most $3N$. The search proceeds greedily until no improving neighbor exists. Starting from the empty action vector means interventions are added only when justified by the value function, producing conservative action vectors by construction. Each Q-evaluation invokes the TAP once via the post-decision travel cost $C_{\text{travel}}(S_t^{A})$; the TAP is therefore called for every neighbour evaluated during the search.
+
+\paragraph{Sequential per-asset selection with coordination.}
+An alternative is to process assets one at a time in a fixed order: the agent selects an action $a_i^t$ for asset $i$ using the Q-network, updates the traffic state to reflect this decision, and proceeds to asset $i+1$. After all $N$ assets have been processed, an optional coordination step applies a single pass of neighborhood local search over the committed joint action to repair ordering artifacts. This approach is conventional in the maintenance optimization literature \citep{andriotis_managing_2019, vanremmerdenDeepMultiobjectiveReinforcement2025}, where it performs well when assets are coupled primarily through shared budgets. In the present setting it introduces an ordering asymmetry---assets processed early are evaluated against an incomplete traffic picture---which the coordination step partially mitigates.
+
+\paragraph{Branching Dueling Q-Network (BDQ).}
+The Branching Dueling Q-Network \citep{tavakoli_action_2018} eliminates the ordering asymmetry by selecting all $N$ asset actions in parallel from a single shared state representation. A deep neural network processes the full system state $S_t$, followed by $N$ independent action branches, each outputting Q-values for its $|\mathcal{A}_i|$ actions. The greedy joint action is assembled by taking the argmax of each branch independently, learning a factorized Q-function $Q(S_t, A_t) \approx \sum_i Q_i(S_t, a_i^t)$, where the shared trunk ensures all branches are conditioned on the same global state snapshot. BDQ has been shown to scale to action spaces of the order of $10^{25}$ discrete combinations \citep{tavakoli_action_2018}.
+
+The independence assumption across branches is BDQ's principal limitation in networked settings. Three mechanisms relax it. \emph{Message passing}: after computing per-branch embeddings $z_i$ from the trunk, a round of message passing computes $\tilde{z}_i = z_i + \sum_{j \in \mathcal{N}_i} w_{ij} z_j$, where $\mathcal{N}_i$ is the road-network neighborhood of asset $i$ and $w_{ij}$ are learnable or flow-weighted scalars, allowing each branch to condition on what neighboring branches are likely to do. \emph{GAT pre-processing}: the monolithic trunk is replaced by a Graph Attention Network \citep{velickovic_graph_2018} that treats assets as graph nodes and computes attention-weighted aggregations over structural neighbors; concretely, a two-layer GAT computes per-asset embeddings $e_i^{(1)} = \sigma\!\bigl(\sum_{j \in \mathcal{N}_i \cup \{i\}} \alpha_{ij} W^{(1)} x_j\bigr)$, where $\alpha_{ij}$ are attention coefficients derived from edge capacities and flow levels, giving each Q-head topology-aware context without cross-branch communication at inference time. \emph{Pairwise coordination penalties}: the BDQ objective is augmented with penalties $\lambda_{ij} \cdot \mathbf{1}\{a_i = \text{renovate}\} \cdot \mathbf{1}\{a_j = \text{renovate}\}$, with $\lambda_{ij}$ proportional to the expected traffic interaction estimated from the TAP surrogate, introducing interaction awareness at the action-selection stage without changing the branch architecture. We evaluate the GAT pre-processing variant as the primary extension, as it integrates naturally with the road network graph defined in Section~\ref{subsec:network}.
+
+\subsection{DQN with Ranking Value Function}
+\label{subsec:DQN_rank}
+
+A limitation of the regression-based value function in Section~\ref{subsec:DQN} is that it must accurately predict absolute cost-to-go values, which can be difficult due to the heavy-tailed cost distribution. For the purpose of action selection via local search, however, only the \emph{relative ordering} of states matters: the search needs to identify which neighboring state has lower cost-to-go, not the exact value. This motivates a ranking-based alternative.
+
+Instead of training XGBoost to predict $\hat{V}(S_t)$ directly, we train a \emph{pairwise ranking model} that, given two states $S$ and $S'$, predicts which has the lower cost-to-go. Training pairs $(S^{(j)}, S^{(k)}, y^{jk})$ are constructed from the simulation data, where $y^{jk} = 1$ if $\hat{v}^{(j)} < \hat{v}^{(k)}$ and $y^{jk} = 0$ otherwise, with $\hat{v}$ computed as in~\eqref{eq:target}. XGBoost supports learning-to-rank objectives (e.g., LambdaRank) natively, making this a straightforward modification of the DQN pipeline.
+
+During local search, candidate neighbor states are ranked rather than scored, and the neighbor ranked first (predicted to have the lowest cost-to-go) is selected. The intuition is that ranking is a simpler task than regression under heavy-tailed distributions, and the resulting comparisons may be more reliable in regions where absolute value estimates are noisy.
+
+\subsection{Actor-Critic: DQN with Policy Network}
+\label{subsec:DQN_actor}
+
+The local search in Section~\ref{subsubsec:action_generation} is deterministic and greedy, which may cause it to consistently miss actions that are globally better but locally inferior. As an alternative action-generation mechanism, we additionally train a \emph{policy network} on the same data used to train the value function.
+
+\paragraph{Relation to PPO.}
+Combining a value function with a learned policy is the defining structure of actor-critic methods. However, this method differs from Proximal Policy Optimization (PPO) in a fundamental way: PPO trains the policy via direct gradient ascent on expected return, clipping updates to remain close to the current policy. Here, instead, the policy network is trained by \emph{supervised imitation} of the actions selected by the value-function-guided local search: the training signal is a cross-entropy loss against the local-search-optimal actions, not a policy gradient objective. The result is an actor-critic architecture in which the actor is updated by behavioral cloning from the critic's choices, rather than by on-policy rollout gradients. This is more sample-efficient in the current setting---where environment interactions are expensive---but does not carry PPO's convergence guarantees or its exploration properties.
+
+The policy network maps states to actions: trained on (state, chosen action) pairs derived from the local search outputs, it learns to directly propose joint actions without requiring iterative neighbor evaluation. At decision time, the policy network generates candidate actions \emph{probabilistically}, sampling from the learned action distribution. This is combined with the value function to evaluate generated candidates, using a \emph{patience-based} stopping criterion:
+
+\begin{enumerate}
+    \item Initialize the current best action $A^* \leftarrow (\textsf{none}, \ldots, \textsf{none})$ with value $\hat{Q}^* \leftarrow \hat{Q}(S_t, A^*)$.
+    \item Set the patience counter $p \leftarrow 0$.
+    \item Sample a candidate action $A' \sim \pi_{\text{pol}}(S_t)$ from the policy network.
+    \item Evaluate $\hat{Q}(S_t, A')$ using~\eqref{eq:approx_Q}.
+    \item If $\hat{Q}(S_t, A') < \hat{Q}^*$: update $A^* \leftarrow A'$, $\hat{Q}^* \leftarrow \hat{Q}(S_t, A')$, reset $p \leftarrow 0$.
+    \item Else: increment $p \leftarrow p + 1$.
+    \item If $p < P$: go to step 3. Otherwise: return $A^*$.
+\end{enumerate}
+
+The patience parameter $P$ controls the exploration--exploitation tradeoff: a larger $P$ allows more candidate actions to be evaluated, improving the chance of finding a better action at the cost of more value function evaluations. This approach combines the policy network's ability to propose plausible joint actions (avoiding the combinatorial search of neighborhood methods) with the value function's ability to discriminate between candidates. In the experimental evaluation, we additionally compare this behavioral-cloning actor against a Proximal Policy Optimization (PPO) baseline (Section~\ref{sec:experiments}).
+
+\subsection{Multi-Agent Reinforcement Learning (MARL) with CTDE}
+\label{subsec:MARL}
+
+Multi-agent reinforcement learning (MARL) with centralized training and decentralized execution (CTDE) takes a fundamentally different approach by treating each asset as an independent agent with its own \emph{policy network} \citep{saifullah_multi-agent_2026}. During training, a centralized critic has access to the full joint state and all agents' actions simultaneously, and provides a training signal that accounts for the global interaction structure---including traffic redistribution effects between assets. At execution time, each agent's policy network acts using only local observations, making the approach scalable without requiring global communication.
+
+CTDE is a \emph{policy approximation} method: each agent's policy $\pi_i(a_i \mid o_i)$ is learned directly, rather than derived from a value function. The centralized critic during training means that the policies are shaped by an awareness of cross-asset interactions that would be invisible to purely independent learners. \citet{yao_multi-agent_2024} apply a CTDE variant (QMIX) specifically to interdependent pavement networks in CACAIE, explicitly noting that traffic equilibrium creates functional interdependencies between segments that single-agent approaches miss---the same challenge that motivates CTDE here. The main challenge at the scale of $N = 80$ assets is non-stationarity: as each agent's policy changes during training, the environment experienced by every other agent changes simultaneously, which can destabilize learning. The GAT encoder described in Section~\ref{subsubsec:action_generation} can be applied here too, giving each agent's local observation a topology-aware embedding of its graph neighborhood.
+
+\subsection{TAP Surrogate Model and Accuracy Control}
+\label{subsec:surrogate}
+
+Because the Traffic Assignment Problem must be evaluated at each decision epoch---both to compute costs and to update the degradation model---the TAP is the dominant computational bottleneck during training. A machine learning surrogate model that predicts congestion outcomes directly from the capacity reduction vector avoids repeated Frank-Wolfe iterations, enabling faster episode rollouts \citep{boschMachineLearningPredictions2025}. The key challenge is ensuring that the surrogate remains accurate as training progresses and the agent explores new regions of the action space.
+
+We address this through a phased deployment and periodic control mechanism. In the early phase of training, all transitions are evaluated using the exact TAP solver, and the surrogate is trained in parallel on the collected (capacity vector, network flow) pairs. Once the surrogate's out-of-sample prediction error drops below a threshold $\varepsilon_{\text{switch}}$---measured on a held-out validation set of TAP instances---the agent transitions to \emph{mixed evaluation}: each epoch is evaluated by the surrogate with probability $p_{\text{surr}}$ and by the exact TAP with probability $1 - p_{\text{surr}}$. The mixing probability $p_{\text{surr}}$ can be increased gradually (curriculum switching) or set to a fixed value (soft switching). Exact TAP evaluations during the mixed phase serve two purposes: they generate fresh training data for surrogate fine-tuning, and they provide an ongoing check on surrogate accuracy.
+
+The accuracy control mechanism operates as follows. A sliding window of recent exact TAP evaluations is maintained; after each window, the mean absolute percentage error between surrogate predictions and exact solutions is recomputed. If the error exceeds a reversion threshold $\varepsilon_{\text{revert}}$ (indicating that the agent has drifted into a region of the action space where the surrogate is no longer reliable), the system temporarily reverts to full exact evaluation and triggers a surrogate retraining step on the recently collected data. This closed-loop design ensures that the surrogate is exploited only when its predictions are trustworthy for the solution space the agent currently occupies, and that drift---caused by policy improvement or shifts in traffic demand---is detected and corrected automatically.
+
+\subsection{Summary}
+\label{subsec:method_summary}
+
+Table~\ref{tab:method_comparison} summarizes the key characteristics of all methods considered. The heuristic baselines are computationally cheap but myopic. The DQN variants differ in value function model (regression, ranking) and action generation mechanism (local search, sequential per-asset, BDQ). The actor-critic extension adds a learned policy network on top of the DQN value function. MARL with CTDE approaches the problem from a fundamentally different angle, treating each asset as an independent agent coordinated through a centralized critic.
+
+\begin{table*}[htpb]
+\centering
+\caption{Comparison of solution methods.}
+\label{tab:method_comparison}
+\small
+\begin{tabular}{lccc}
+\hline
+\textbf{Method} & \textbf{Action generation} & \textbf{Anticipation} & \textbf{Action interactions} \\
+\hline
+Reactive           & Threshold rule            & Myopic         & None \\
+Paced              & Priority + pacing         & Single-step    & Implicit (pace) \\
+DQN + local search & Neighborhood search       & Q-func.\ (1-step) & Via local search \\
+DQN + sequential   & Per-asset greedy          & Q-func.\ (1-step) & Order-dep.\ + coord. \\
+DQN + BDQ (GAT)    & Parallel branched         & Q-func.\ (1-step) & Shared trunk + GAT \\
+DQN + Ranking      & Neighborhood search       & Ranking value fn. & Via local search \\
+Actor-Critic       & Policy network (patience) & Q-func.\ (1-step) & End-to-end sample \\
+MARL CTDE          & Per-agent policy          & Policy (PA)    & Centralized critic \\
+PPO                & Policy gradient (clipped)  & Policy + value (on-policy) & Factorized per-asset \\
+\hline
+\end{tabular}
+\end{table*}
+
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate the proposed methods in two experiments of increasing scale and realism. The first experiment (Section~\ref{sec:exp1}) uses a small synthetic case study to screen all proposed methods; only those that perform competitively progress to the second experiment. The second experiment (Section~\ref{sec:exp2}) applies the best-performing methods to a real-world case study in Amsterdam.
+
+\subsection{Experiment 1: Synthetic Case Study on the Sioux Falls Network}
+\label{sec:exp1}
+
+\subsubsection{Setup}
+
+The first experiment uses the Sioux Falls traffic network, a standard benchmark in the road network optimization literature, consisting of 24 nodes and 76 directed edges. We select $N = 20$ edges as infrastructure assets subject to maintenance, representing a tractable but non-trivial problem size for which all proposed methods can be evaluated within reasonable time.
+
+Episodes span $T = 240$ half-year periods ($\Delta t = 0.5$ yr; 120 years), consistent with the finite-horizon MDP formulation described in Section~\ref{subsec:objective}. End-of-horizon effects are addressed via bootstrapped truncation: the terminal cost target is augmented by $\gamma^{T} \hat{V}(S_{T}; \theta)$, so the agent is not incentivised to let assets degrade near the episode boundary. Asset conditions are initialized from a fixed distribution reflecting a realistic mix of deterioration stages ($d_i \sim \mathrm{Uniform}(0.3, 0.8)$). Renovation durations follow the stochastic model in Section~\ref{subsec:degradation}; the expected renovation duration scales with asset length as $e_i^{\text{ren}} = (10 + L_i / 5)$ weeks, yielding multi-year project durations for assets in the kilometre range. Traffic demand is held constant and calibrated to the standard Sioux Falls OD matrix, but vehicle loss hours are scaled down to an urban context by multiplying by 0.01. Table~\ref{tab:exp1_params} reports the key parameter settings.
+
+\begin{table}[htpb]
+\centering
+\caption{Parameter settings for Experiment 1 (Sioux Falls, synthetic).}
+\label{tab:exp1_params}
+\small
+\begin{tabular}{ll}
+\hline
+\textbf{Parameter} & \textbf{Value} \\
+\hline
+Network             & Sioux Falls (24 nodes, 76 edges) \\
+Assets ($N$)        & 20 \\
+Epoch length ($\Delta t$)  & 0.5 yr (half-year) \\
+Planning horizon ($T$)    & 240 epochs (120 years) \\
+Discount factor ($\gamma$) & [placeholder] \\
+Baseline shape rate ($\alpha_i^0$) & $\mathrm{LogNormal}(\mu = 0.05,\; \sigma_{\log} = 0.3)$ \\
+Rate parameter ($\beta_i$) & $\beta_i = \alpha_i^0 \cdot e_{\mathrm{fail},i}$, $\;e_{\mathrm{fail}} \sim \mathrm{LogNormal}(\mu = 60\text{ yr},\; \mathrm{CV} = 0.1)$ \\
+Asset length ($L_i$)       & $\mathrm{LogNormal}(\mu = 2000\text{ m},\; \mathrm{CV} = 0.5)$\tnote{a} \\
+Renovation cost ($c_i^{\text{ren}}$) & $50{,}000 \cdot L_i$ euros (length-proportional) \\
+Repair cost ($c_i^{\text{rep}}$) & $25{,}000 \cdot L_i$ euros (length-proportional) \\
+Risk base ($r_{\text{base}}$) & $10{,}000$ euros/m/year/step \\
+Renovation capacity factor ($\eta^{\text{ren}}$) & $0.05$ (5\% of nominal capacity) \\
+Restriction capacity factor ($\eta^{\text{load}}$) & $0.40$ (40\% of nominal capacity) \\
+Restriction degradation multiplier ($f_{\text{degrad}}$) & $0.9$ (10\% rate reduction) \\
+Value of time ($\nu_{\text{vot}}$) & $10.76$ euros/vehicle-hour \\
+\hline
+\multicolumn{2}{l}{\footnotesize $^a$ Long assets ensure multiple concurrent renovation
+projects arise within the 120-year horizon for a portfolio of $N=20$ assets, making the
+scheduling problem non-trivial.} \\
+\end{tabular}
+\end{table}
+
+\subsubsection{Methods Evaluated}
+
+All methods described in Section~\ref{sec:methodology} are evaluated: the two heuristic baselines (Reactive, Paced), the DQN variants (local search, sequential, BDQ with GAT, ranking), and the actor-critic extension.
+
+\subsubsection{Results}
+
+Table~\ref{tab:exp1_results} reports the mean total discounted cost over [placeholder: $n$] independent evaluation episodes, along with standard deviation and computation time per training run. Methods that perform within [placeholder: e.g., 10\%] of the best-performing method and exhibit stable training behavior are selected to progress to Experiment 2.
+
+\begin{table*}[htpb]
+\centering
+\caption{Experiment 1 results. Mean total discounted cost $\pm$ standard deviation over [placeholder] evaluation episodes.}
+\label{tab:exp1_results}
+\small
+\begin{tabular}{lccc}
+\hline
+\textbf{Method} & \textbf{Mean cost} & \textbf{Std.\ dev.} & \textbf{Training time} \\
+\hline
+Reactive Heuristic      & [placeholder] & [placeholder] & -- \\
+Paced Heuristic         & [placeholder] & [placeholder] & -- \\
+DQN + local search      & [placeholder] & [placeholder] & [placeholder] \\
+DQN + sequential        & [placeholder] & [placeholder] & [placeholder] \\
+DQN + BDQ (GAT)         & [placeholder] & [placeholder] & [placeholder] \\
+DQN + ranking           & [placeholder] & [placeholder] & [placeholder] \\
+DQN + Actor-Critic      & [placeholder] & [placeholder] & [placeholder] \\
+\hline
+\end{tabular}
+\end{table*}
+
+\subsubsection{Analysis}
+
+[Placeholder: discuss which methods progress and key failure modes of eliminated methods.]
+
+\subsection{Experiment 2: Real-World Case Study in Amsterdam}
+\label{sec:exp2}
+
+\subsubsection{Setup}
+
+The second experiment uses the road network of the city of Amsterdam, focusing on the portfolio of quay walls and bridges managed by the municipality. This case study reflects a realistic planning challenge: assets vary substantially in age, structural condition, and traffic loading, and the network is dense enough that simultaneous renovations have pronounced cascade effects on congestion.
+
+The decision epoch length and episode structure are calibrated to the municipality's current multi-year maintenance planning cycle. Traffic demand is derived from the municipality's traffic model, which distinguishes peak and off-peak periods. The asset portfolio includes [placeholder: $N$] infrastructure objects, making this a substantially larger problem than Experiment 1.
+
+\subsubsection{Methods Evaluated}
+
+We evaluate the heuristic baselines (Reactive, Paced) and the subset of methods that progressed from Experiment 1. This allows a direct comparison between best-practice heuristics and the learning-based approaches under conditions closely matching the real decision problem.
+
+\subsubsection{Results}
+
+[Placeholder: results table and figures for Experiment 2, analogous to Table~\ref{tab:exp1_results}.]
+
+\subsubsection{Analysis}
+
+[Placeholder: discuss generalization of findings from Experiment 1, practical implications for the municipality of Amsterdam, and limitations of the current approach (e.g., assumed constant demand, single-objective formulation).]
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper introduces the network-level MR\&R scheduling problem under stochastic deterioration, formulated as a finite-horizon MDP that integrates monotone stochastic degradation via a Gamma process, uncertain renovation durations modelled as a Wiener process with drift, traffic network effects, and multiple maintenance action types within a unified framework. We develop and compare several solution approaches spanning heuristic policies, Deep Q-Networks with regression and ranking value function approximators, and several extensions including actor-critic methods and multi-agent reinforcement learning.
+
+Across both a synthetic benchmark and a real-world Amsterdam case study, the results demonstrate [placeholder: summary of findings]. Key insights include [placeholder]. The most computationally efficient approach that achieves competitive performance is [placeholder].
+
+Future work should address [placeholder: e.g., multi-objective extensions, demand uncertainty, integration of inspection decisions, improved surrogate models for the TAP].
+
+\bibliographystyle{elsarticle-num}
+\bibliography{references}
+
+\end{document}

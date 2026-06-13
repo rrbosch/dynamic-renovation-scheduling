@@ -1,0 +1,8 @@
+{
+  "base_config": "configs/exp_simple_paced.json",
+  "n_workers": 4,
+  "search_space": {
+    "agent.extra.threshold": [0.9, 0.95, 1],
+    "agent.extra.pace_threshold": [1, 1.5, 2, 3, 4]
+  }
+}

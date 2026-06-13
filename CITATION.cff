@@ -1,0 +1,44 @@
+# Citation metadata. Zenodo reads this file automatically on release to populate
+# the deposit's authors, title, and license.
+#
+# TODO before archiving: verify author given-names, order, and add ORCIDs.
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+title: "Reinforcement Learning for Dynamic Infrastructure Renovation Scheduling"
+abstract: >-
+  Research code for scheduling maintenance actions (renovate, repair, restrict,
+  do nothing) across a portfolio of infrastructure assets over a finite planning
+  horizon to minimise expected discounted cost. Models stochastic degradation via
+  a usage-dependent Gamma process, renovation-duration uncertainty via a Wiener
+  process, and network traffic-flow impacts via the Traffic Assignment Problem.
+type: software
+authors:
+  - given-names: Robbert
+    family-names: Bosch
+    affiliation: University of Twente
+    email: robbert.bosch@gmail.com
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+  - given-names: Patricia
+    family-names: Rogetzer
+    affiliation: University of Twente
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+  - given-names: Wouter
+    family-names: van Heeswijk
+    affiliation: University of Twente
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+  - given-names: Martijn
+    family-names: Mes
+    affiliation: University of Twente
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+keywords:
+  - reinforcement learning
+  - approximate dynamic programming
+  - infrastructure maintenance
+  - maintenance scheduling
+  - traffic assignment problem
+license: MIT
+# Fill these in once the code is archived / the paper is published:
+# version: "1.0.0"
+# date-released: "2026-01-01"
+# doi: "10.5281/zenodo.XXXXXXX"
+# repository-code: "https://github.com/<user>/<repo>"
