@@ -131,7 +131,7 @@ A config is a thin JSON wrapper: it selects the network, TAP backend, seed, the 
 |---|---|
 | `tap_backend` | `fast` (Numba Frank-Wolfe, default), `null` (no traffic coupling), `surrogate` (learned TAP) |
 | `training.truncation_mode` | `none`, `horizon_rollout`, `bootstrap` (terminal handling for training targets) |
-| `training.buffer_strategy` | `fifo`, `lowest_error`, `knockout` |
+| `training.buffer_strategy` | `fifo`, `lowest_error`, `stochastic_knockout` |
 | `training.n_workers` | Multi-core parallelism (episode collection / evaluation / rollouts) |
 
 See `configs/` for complete examples.
