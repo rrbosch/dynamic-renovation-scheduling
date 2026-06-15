@@ -171,5 +171,3 @@ registry. Status ⬜ for all (not started). Run names: `i10p_adp_{ag}_{init}_{bu
   derive `i30p_*` configs from the Exp 0 survivors.
 - **Exp 2 case study undefined** — `load_amsterdam` is a stub; decide the large network.
 - This status table is hand-maintained. Consider a script to scan `results/` and auto-fill status.
-- Before submitting on Snellius: fix the `python3.9`-vs-loaded-module mismatch in `hpc/hq_task.sh`
-  if still present (flagged in `hpc_workflow_context.md`).
