@@ -37,8 +37,8 @@ keywords:
   - maintenance scheduling
   - traffic assignment problem
 license: MIT
+repository-code: "https://github.com/rrbosch/dynamic-renovation-scheduling"
 # Fill these in once the code is archived / the paper is published:
 # version: "1.0.0"
 # date-released: "2026-01-01"
 # doi: "10.5281/zenodo.XXXXXXX"
-# repository-code: "https://github.com/<user>/<repo>"
