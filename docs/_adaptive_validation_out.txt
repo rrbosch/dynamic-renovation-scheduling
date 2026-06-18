@@ -1,0 +1,6 @@
+# shortened eval: T=40 tail=40 eval_len=80 n_rollouts=10, instance_10p economics, 2 CRN episodes
+
+base reactive(degenerate)  mean_cost=3.619e+08  risk%= 5.6 maint%=81.9 travel%=12.5  none%=97.8 ren%=0.5
+OLD rollout (vanishing)    mean_cost=3.944e+09  risk%=91.8 maint%= 7.4 travel%= 0.8  none%=98.4 ren%=0.3
+FIXED rollout (fixed-sel)  mean_cost=5.434e+08  risk%= 5.8 maint%=85.8 travel%= 8.4  none%=97.8 ren%=0.7
+FIXED rollout (adaptive)   mean_cost=5.361e+08  risk%= 6.2 maint%=85.3 travel%= 8.5  none%=98.1 ren%=0.8

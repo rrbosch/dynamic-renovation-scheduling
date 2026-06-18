@@ -356,11 +356,53 @@ def build_experiment(config: ExperimentConfig):
     return env, agent, trainer
 
 
+def _check_extra_keys(agent_type: str, extra: dict, allowed: set) -> None:
+    """Fail loudly on unrecognised keys in an agent's `extra` block.
+
+    Config values are read via `extra.get(key, default)`, so a misspelled or
+    renamed key is otherwise *silently ignored* and the agent falls back to its
+    default — e.g. `max_steps` instead of `rollout_horizon` once silently
+    disabled the rollout lookahead and made the agent ~10x worse than its base
+    policy. Validating the keys up front turns that class of mistake into an
+    immediate, explicit error instead of a corrupted experiment.
+    """
+    unknown = set(extra) - set(allowed)
+    if not unknown:
+        return
+    import difflib
+    lines = []
+    for key in sorted(unknown):
+        hint = difflib.get_close_matches(key, allowed, n=1)
+        suffix = f" (did you mean {hint[0]!r}?)" if hint else ""
+        lines.append(f"  - {key!r}{suffix}")
+    raise ValueError(
+        f"Unknown key(s) in agent.extra for agent_type={agent_type!r}:\n"
+        + "\n".join(lines)
+        + f"\nValid keys: {sorted(allowed)}"
+    )
+
+
+# Recognised `extra` keys per agent_type. Used by _check_extra_keys to reject
+# typos/renamed keys instead of silently falling back to defaults. Extend this
+# when adding a new `extra.get(...)` read for one of these agent types.
+_ROLLOUT_EXTRA_KEYS = {
+    'n_rollouts', 'rollout_horizon', 'rollout_seed', 'action_threshold',
+    'initial_action', 'rollout_selection', 'p_threshold', 'min_rollouts',
+    'max_rollouts', 'rollout_batch', 'rollout_policy',
+}
+_REACTIVE_EXTRA_KEYS = {'threshold', 'repair_threshold', 'restrict_threshold'}
+_PACED_EXTRA_KEYS = {'threshold', 'pace_threshold'}
+
+
 def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers: int = 1) -> Agent:
     at = agent_config.agent_type
     extra = agent_config.extra
 
     if at in ('reactive', 'optuna_heuristic'):
+        # 'optuna_heuristic' carries tuning-only keys (param_space, etc.) consumed
+        # in build_experiment, so only validate the plain reactive case.
+        if at == 'reactive':
+            _check_extra_keys(at, extra, _REACTIVE_EXTRA_KEYS)
         from agents.heuristics import ReactiveAgent
         return ReactiveAgent(
             threshold=extra.get('threshold', 0.7),
@@ -370,6 +412,7 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
         )
 
     if at == 'paced':
+        _check_extra_keys(at, extra, _PACED_EXTRA_KEYS)
         from agents.heuristics import PacedAgent
         return PacedAgent(threshold=extra.get('threshold', 0.7), pace_threshold=extra.get('pace_threshold'),
                           env_config=env.config)
@@ -419,6 +462,7 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
         return CTDEAgent()
 
     if at in ('rollout', 'sequential_rollout'):
+        _check_extra_keys(at, extra, _ROLLOUT_EXTRA_KEYS)
         if at == 'rollout':
             from agents.rollout import MonteCarloRolloutAgent as RolloutCls
         else:
@@ -439,14 +483,15 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
             seed=extra.get('rollout_seed', seed),
             action_threshold=extra.get('action_threshold', 0.5),
             initial_action=extra.get('initial_action', 'policy'),
-            # Adaptive (sequential Wilcoxon) rollout budgeting. Default 'fixed'
-            # preserves the legacy fixed-n_rollouts behaviour exactly; set
-            # rollout_selection='adaptive' to opt in. See
-            # docs/adaptive_rollout_literature.md.
-            selection=extra.get('rollout_selection', 'fixed'),
-            p_threshold=extra.get('p_threshold', 0.1),
-            min_rollouts=extra.get('min_rollouts', 5),
-            max_rollouts=extra.get('max_rollouts', None),
+            # Adaptive (sequential Wilcoxon) rollout budgeting is the default
+            # (p=0.02, min=20, max=100 — the chosen Pareto operating point from
+            # the instance_10p sweep: ~sub-1% mean cost regret at ~62% rollouts
+            # saved). Set rollout_selection='fixed' to restore the legacy
+            # fixed-n_rollouts behaviour. See docs/adaptive_rollout_literature.md.
+            selection=extra.get('rollout_selection', 'adaptive'),
+            p_threshold=extra.get('p_threshold', 0.02),
+            min_rollouts=extra.get('min_rollouts', 20),
+            max_rollouts=extra.get('max_rollouts', 100),
             rollout_batch=extra.get('rollout_batch', 5),
         )
 

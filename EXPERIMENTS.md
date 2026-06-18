@@ -93,22 +93,28 @@ network interface exists but `load_amsterdam` is an unimplemented stub.)
 
 ## Current Status
 
-Source of truth for the queue: [hpc/registry.json](hpc/registry.json). Currently holds **Exp 0**:
-**32 runs** (32 configs × 1 replication). Replication / `n_workers` conventions:
+Source of truth for the queue: [hpc/registry.json](hpc/registry.json). **Exp 0**: 32 runs (32 configs
+× 1 replication). Replication / `n_workers` conventions:
 [hpc/registry_conventions.md](hpc/registry_conventions.md). Status column is **manual — update as runs
-complete.** All 32 configs build-test OK (incl. neural-VFA ADP and PPO).
+complete.** All 32 configs build-test OK.
 
-**Submit in two stages (0A feeds 0B):**
-```
-# Stage 0A — tune heuristics first (single-threaded, 1 core each)
-hq submit --array 29-31 --pin taskset --cpus=1 hpc/hq_task.sh   # 3 optuna heuristics
-# → then inject each best_params.json into the 0B configs (warmstart / rollout_policy)
+**Results layout:** all runs write to **`results/exp0/<run_name>/`** (config `run_name` = `exp0/...`).
+0A optuna results live there; old pre-restructure dirs (`exp_rollout_*`, `heuristics_experiment`, …)
+are stale clutter at `results/` top level, left untouched.
 
-# Stage 0B — learners, after 0A params are in (8 cores each)
-hq submit --array 0-28  --pin taskset --cpus=8 hpc/hq_task.sh   # 29 ADP/rollout/PPO
+**Dispatch:** switched from HyperQueue to a **native SLURM array** ([hpc/submit_array.sh](hpc/submit_array.sh))
+— disconnect-proof (no login-node HQ server; the first run died when that server was killed). Snellius
+shares single-node jobs and the QOS allows 128 concurrent, so all 29 run at once. HQ scripts kept as
+fallback. See [hpc/snellius_reference.md](hpc/snellius_reference.md).
 ```
-(The registry orders learners at indices 0–28 and optuna at 29–31, but the **run order is 0A then
-0B** because of the parameter dependency.)
+# 0A — DONE (results/exp0/i10p_optuna_*; reactive best_params injected into 0B).
+# 0B — re-run FROM SCRATCH (old partial/buggy 0B results deleted):
+sbatch --array=1     hpc/submit_array.sh   # smoke test (one ADP) first
+sbatch --array=0-28  hpc/submit_array.sh   # ppo(0) + ADP(1-24) + rollout(25-28), 28h walltime
+# Index 29-31 = optuna 0A — do NOT re-run.
+```
+(Registry order: ppo=0, ADP=1-24, MC rollout=25-28, optuna=29-31. PPO still won't write eval until
+the spawned ppo_trainer.evaluate fix lands.)
 
 ### 0a. Optuna heuristics — 3/3 built · 1 run each · single-threaded
 **v2 (WilcoxonPruner + 100 tuning episodes) DONE.** v1 (30 ep, no pruner) archived under
@@ -122,22 +128,33 @@ reactive < paced < perasset unchanged). v2's reactive now uses repair (thr 0.924
 | i10p_optuna_paced | 947M ± 769M | ✅ done |
 | i10p_optuna_perasset | 1125M ± 691M | ✅ done |
 
-### 0b-i. ADP grid — **24/24 built**
+### 0b-i. ADP grid — **24/24 built** · 🟢 submitted (array 1-24, stage 0B-1)
 All cells of `{normal,seq} × {empty,policy} × {fifo,lowesterror,knockout} × {xgb,nn}` are in the
-registry. Status ⬜ for all (not started). Run names: `i10p_adp_{ag}_{init}_{buf}_{vfa}`.
+registry. Run names: `i10p_adp_{ag}_{init}_{buf}_{vfa}`. Reactive warmstart injected into the 12
+`*_policy_*` cells.
 
-### 0b-ii. MC rollout — 4/4 built
+### 0b-ii. MC rollout — 4/4 built · ⚠️ first run was buggy → FIXED, needs re-run
+First 0B run produced **pathological ~10B eval (99% risk, do-nothing)**. Root cause (found + fixed):
+a **vanishing rollout horizon** — configs set `max_steps` but `configs.py` read `rollout_horizon`, so
+the window was dropped and `_estimate_q` used `max_steps = cfg.T - t_next`, which goes ≤0 across the
+eval tail (T+tail) → zero rollouts → do-nothing → escalating C_risk. Fixes in `agents/rollout.py`
+(horizon now a fixed t-independent window), `configs.py` (`_check_extra_keys` rejects unknown extras),
+and the 4 configs (`max_steps`→`rollout_horizon: 100`). Local CRN validation: 3.9e9/92%-risk →
+~5.4e8/~6%-risk (vs reactive base 3.6e8 at shortened T). Uses **adaptive sequential-Wilcoxon**
+budgeting (`rollout_selection: adaptive`, `p_threshold 0.02`, `min/max_rollouts 20/100`).
+**Open:** full 50-ep Snellius eval not yet run — re-run to confirm it lands near/below 830M base; may
+only *match* base at this budget (consider higher `n_rollouts` / less-degenerate base ~0.7 to beat it).
 | Run | In registry | Status |
 |---|---|---|
-| i10p_rollout_empty | ✅ | ⬜ |
-| i10p_rollout_policy | ✅ | ⬜ |
-| i10p_seq_rollout_empty | ✅ | ⬜ |
-| i10p_seq_rollout_policy | ✅ | ⬜ |
+| i10p_rollout_empty | ✅ | 🔧 fixed, re-run pending |
+| i10p_rollout_policy | ✅ | 🔧 fixed, re-run pending |
+| i10p_seq_rollout_empty | ✅ | 🔧 fixed, re-run pending |
+| i10p_seq_rollout_policy | ✅ | 🔧 fixed, re-run pending |
 
-### 0b-iii. PPO curriculum — 1/1 built
+### 0b-iii. PPO curriculum — 1/1 built · 🟢 submitted (array 0, stage 0B-1)
 | Run | In registry | Status |
 |---|---|---|
-| i10p_ppo_curriculum | ✅ | ⬜ |
+| i10p_ppo_curriculum | ✅ | 🟢 submitted |
 
 ---
 
@@ -146,9 +163,11 @@ registry. Status ⬜ for all (not started). Run names: `i10p_adp_{ag}_{init}_{bu
 - **Replication:** Exp 0 = **1 per config** (exploration). Exp 1 / Exp 2 = **5 seeds** per config
   (report with `rliable`: stratified bootstrap CIs). **Optuna tuning is never replicated** (1 run).
   See [hpc/registry_conventions.md](hpc/registry_conventions.md).
-- **Workers:** learner configs use `n_workers = 8` (HQ `--cpus=8`). **Optuna heuristic search is
-  single-threaded** (`n_workers = 1`, `--cpus=1`) — its trainer runs trials and episodes
-  sequentially and ignores extra workers. Use `n_workers: 1` everywhere on the laptop.
+- **Workers:** learner configs use `n_workers = 16` with `--cpus-per-task=16` (the Snellius minimum
+  shareable slot, so it's the smallest billed unit anyway — see
+  [hpc/registry_conventions.md](hpc/registry_conventions.md); no `--mem-per-cpu`). **Optuna heuristic
+  search is single-threaded** (`n_workers = 1`) — sequential, ignores extra workers. Use `n_workers:
+  1` everywhere on the laptop.
 - **Walltime:** 24 h per run (`time_budget: 86400`).
 - Runs dispatched via HyperQueue; `hpc/run_task.py` applies the per-entry `seed`/`run_name` overrides
   from the registry.

@@ -48,21 +48,6 @@ def rollout_noise(
     return u, eps
 
 
-def _fmt_duration(seconds: float) -> str:
-    """Format a duration in seconds as 'Xd Xh Xm'."""
-    seconds = int(seconds)
-    d, rem = divmod(seconds, 86400)
-    h, rem = divmod(rem, 3600)
-    m = rem // 60
-    parts = []
-    if d:
-        parts.append(f"{d}d")
-    if h or d:
-        parts.append(f"{h}h")
-    parts.append(f"{m}m")
-    return " ".join(parts)
-
-
 class MonteCarloRolloutAgent(Agent):
     """
     Greedy local search where Q is estimated via Monte Carlo rollouts.
@@ -83,36 +68,47 @@ class MonteCarloRolloutAgent(Agent):
         rollout_horizon: int | None = None,
         seed: int = 0,
         action_threshold: float = 0.5,
-        time_per_rollout_step: float = 0.0005,
-        average_local_search_rounds: int = 4,
-        n_eval_episodes: int = 50,
         initial_action: str = 'policy',
-        selection: str = 'fixed',
-        p_threshold: float = 0.1,
-        min_rollouts: int = 5,
-        max_rollouts: int | None = None,
+        selection: str = 'adaptive',
+        p_threshold: float = 0.02,
+        min_rollouts: int = 20,
+        max_rollouts: int | None = 100,
         rollout_batch: int = 5,
     ):
         self.rollout_policy = rollout_policy
         self.env = env
         self.n_rollouts = n_rollouts
-        self.rollout_horizon = rollout_horizon
+        # Rollout lookahead is a FIXED window measured from the decision epoch.
+        # When unspecified we fall back to the planning-horizon length T (a
+        # constant, t-independent window), NOT `T - t_next`.
+        #
+        # The old `T - t_next` behaviour is a bug: evaluation runs T + tail_epochs
+        # (the tail can be as long as T itself), and for every tail epoch
+        # `t_next >= T` makes `max_steps = T - t_next <= 0`. With no rollout the
+        # agent degenerates to a pure immediate-cost minimiser, which always
+        # picks "none" (renovation/repair cost up front), lets assets fail, and
+        # the escalating risk cost explodes — the rollout ends up ~10x worse than
+        # its own base policy. A fixed window keeps the lookahead long enough to
+        # value renovation at every epoch, including the tail.
+        self.rollout_horizon = (
+            int(rollout_horizon) if rollout_horizon is not None
+            else int(env.config.T)
+        )
         self.seed = seed
         self.action_threshold = action_threshold
-        self.time_per_rollout_step = time_per_rollout_step
-        self.average_local_search_rounds = average_local_search_rounds
-        self.n_eval_episodes = n_eval_episodes
         self.initial_action = initial_action
 
         # --- Adaptive (sequential Wilcoxon) rollout budgeting --------------
-        # selection='fixed'   : legacy behaviour — every candidate gets
-        #                       exactly n_rollouts rollouts, then argmin.
-        # selection='adaptive': incumbent-vs-challenger comparisons stop early
-        #                       on a one-sided paired Wilcoxon signed-rank test
-        #                       over the shared CRN rollout differences (§
-        #                       docs/adaptive_rollout_literature.md). min/max
-        #                       mirror Optuna's WilcoxonPruner n_startup_steps
-        #                       and the rollout budget cap.
+        # selection='adaptive' (default): incumbent-vs-challenger comparisons
+        #   stop early on a one-sided paired Wilcoxon signed-rank test over the
+        #   shared CRN rollout differences (§ docs/adaptive_rollout_literature.md).
+        #   p_threshold / min_rollouts / max_rollouts mirror Optuna's
+        #   WilcoxonPruner (p_threshold / n_startup_steps) plus a budget cap. The
+        #   defaults (p=0.02, min=20, max=100) are the chosen Pareto operating
+        #   point from the p_threshold x min_rollouts sweep on instance_10p
+        #   (~sub-1% mean cost regret at ~62% rollouts saved).
+        # selection='fixed': legacy behaviour — every candidate gets exactly
+        #   n_rollouts rollouts, then argmin.
         if selection not in ('fixed', 'adaptive'):
             raise ValueError(f"selection must be 'fixed' or 'adaptive', got {selection!r}")
         self.selection = selection
@@ -124,8 +120,6 @@ class MonteCarloRolloutAgent(Agent):
             raise ValueError(
                 f"min_rollouts ({self.min_rollouts}) > max_rollouts ({self.max_rollouts})"
             )
-
-        self._print_estimate()
 
     # ------------------------------------------------------------------
     # Public interface
@@ -238,9 +232,17 @@ class MonteCarloRolloutAgent(Agent):
             current_action = np.zeros(n, dtype=int)
         _n_candidates += 1
 
+        # Round cap: unlike the fixed path (where current_q strictly decreases
+        # so termination is guaranteed), the statistical accept decision is not
+        # guaranteed transitive — a noisy accept could in principle cycle. Cap
+        # the improving passes defensively. n full sweeps is far more than a
+        # greedy local search ever needs in practice.
+        max_rounds = max(2 * n, 8)
         improved = True
-        while improved:
+        rounds = 0
+        while improved and rounds < max_rounds:
             improved = False
+            rounds += 1
             for i in range(n):
                 for a in range(4):
                     if a == current_action[i]:
@@ -257,6 +259,7 @@ class MonteCarloRolloutAgent(Agent):
         self.step_metrics = {
             'n_candidates': _n_candidates,
             'n_rollout_sims': self._sim_count,
+            'local_search_rounds': rounds,
         }
         return current_action
 
@@ -398,27 +401,6 @@ class MonteCarloRolloutAgent(Agent):
     # Checkpoint save / load
     # ------------------------------------------------------------------
 
-    def _print_estimate(self):
-        """Print estimated runtime. Override in subclasses for different estimates."""
-        cfg = self.env.config
-        effective_horizon = self.rollout_horizon if self.rollout_horizon is not None else cfg.T
-        n_active = cfg.n_assets * (1 - self.action_threshold)
-        rollouts_per_episode = (
-            n_active
-            * 3
-            * self.average_local_search_rounds
-            * self.n_rollouts
-            * cfg.T
-        )
-        total_rollouts = rollouts_per_episode * self.n_eval_episodes
-        time_per_episode = rollouts_per_episode * self.time_per_rollout_step * effective_horizon
-        time_total = time_per_episode * self.n_eval_episodes
-        print(
-            f"[MonteCarloRolloutAgent] estimated rollouts: {total_rollouts:,.0f}  "
-            f"| per episode: {_fmt_duration(time_per_episode)}  "
-            f"| total ({self.n_eval_episodes} episodes): {_fmt_duration(time_total)}"
-        )
-
     def save(self, path: str) -> None:
         """No mutable state: rollout noise is fully determined by (seed, state, t)."""
         import os
@@ -437,23 +419,6 @@ class SequentialMCRolloutAgent(MonteCarloRolloutAgent):
     action for each given already-committed choices for earlier assets.
     Mirrors SequentialGenerator logic but with MC rollout Q estimation.
     """
-
-    def _print_estimate(self):
-        """Sequential: at most N * 4 candidates per timestep (no local search rounds)."""
-        cfg = self.env.config
-        effective_horizon = self.rollout_horizon if self.rollout_horizon is not None else cfg.T
-        n_active = cfg.n_assets * (1 - self.action_threshold)
-        rollouts_per_episode = (
-            n_active * 4 * self.n_rollouts * cfg.T
-        )
-        total_rollouts = rollouts_per_episode * self.n_eval_episodes
-        time_per_episode = rollouts_per_episode * self.time_per_rollout_step * effective_horizon
-        time_total = time_per_episode * self.n_eval_episodes
-        print(
-            f"[SequentialMCRolloutAgent] estimated rollouts: {total_rollouts:,.0f}  "
-            f"| per episode: {_fmt_duration(time_per_episode)}  "
-            f"| total ({self.n_eval_episodes} episodes): {_fmt_duration(time_total)}"
-        )
 
     def act(self, state: State) -> np.ndarray:
         """Sequential per-asset action selection using MC Q estimates."""

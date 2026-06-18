@@ -78,10 +78,15 @@ def _decision_state(env: InfraEnv, seed: int = 0):
 # Backward compatibility
 # ---------------------------------------------------------------------------
 
-def test_default_selection_is_fixed():
+def test_default_selection_is_adaptive():
+    """Global default is the chosen Pareto operating point (adaptive p=0.02,
+    min=20, max=100). Constructed WITHOUT selection/p/min/max to test defaults."""
     env = _make_env()
-    agent = _agent(env)
-    assert agent.selection == 'fixed'
+    agent = MonteCarloRolloutAgent(rollout_policy=_policy(env), env=env)
+    assert agent.selection == 'adaptive'
+    assert agent.p_threshold == 0.02
+    assert agent.min_rollouts == 20
+    assert agent.max_rollouts == 100
 
 
 def test_invalid_selection_raises():

@@ -99,11 +99,13 @@ PPO and Optuna-heuristic agents read additional keys from `training` (e.g.
 |---|---|---|
 | `rollout_policy` | reactive (thr 0.7) | Base policy config rolled out (nested agent dict) |
 | `n_rollouts` | `30` | Rollouts per Q estimate |
-| `rollout_horizon` | `null` | Rollout depth (defaults to remaining horizon) |
+| `rollout_horizon` | `null` → `T` | **Fixed** lookahead window (epochs) per decision. `null` defaults to the planning-horizon length `T`. Do **not** expect it to shrink with `t`: evaluation runs `T + tail_epochs`, so a `T - t` window would collapse to `0` in the tail and silently turn the agent into a do-nothing policy. (There is no `max_steps` key.) |
 | `initial_action` | `"policy"` | `"policy"` or `"empty"` initial action |
 | `action_threshold` | `0.5` | Local-search acceptance threshold |
-| `rollout_selection` | `"fixed"` | `"fixed"` or `"adaptive"` (sequential Wilcoxon budgeting; see `docs/adaptive_rollout_literature.md`) |
-| `p_threshold`, `min_rollouts`, `max_rollouts`, `rollout_batch` | — | Adaptive-budget controls |
+| `rollout_selection` | `"adaptive"` | `"fixed"` or `"adaptive"` (sequential Wilcoxon budgeting; see `docs/adaptive_rollout_literature.md`) |
+| `p_threshold`, `min_rollouts`, `max_rollouts`, `rollout_batch` | `0.02`, `20`, `100`, `5` | Adaptive-budget controls |
+
+> Unknown keys under `agent.extra` for `reactive`, `paced`, `rollout`, and `sequential_rollout` are **rejected** with a "did you mean…?" error (`_check_extra_keys` in `configs.py`). This prevents a misspelled/renamed key from being silently ignored and falling back to a default.
 
 #### `dcl`
 | Key | Default | Description |
