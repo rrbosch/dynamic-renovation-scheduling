@@ -2,7 +2,7 @@
   "network": "sioux_falls",
   "tap_backend": "fast",
   "seed": 42,
-  "run_name": "i10p_adp_seq_policy_knockout_nn",
+  "run_name": "exp0/i10p_adp_seq_policy_knockout_nn",
   "instance": "instances/instance_10p.json",
   "training": {
     "time_budget": 86400,
@@ -12,7 +12,7 @@
     "buffer_capacity": 200000,
     "buffer_strategy": "stochastic_knockout",
     "n_eval_episodes": 10,
-    "n_workers": 8,
+    "n_workers": 16,
     "n_warmstart_episodes": 1667,
     "warmstart": {
       "agent_type": "reactive",

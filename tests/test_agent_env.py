@@ -35,15 +35,16 @@ def env():
     cfg = EnvConfig(
         n_assets=network.n_assets,
         gamma=0.97,
-        c_fail=1000.0,
         mu_h=np.full(network.n_assets, 1.73),   # ~30 weeks
         sigma_h=np.full(network.n_assets, 0.35),
         delta_repair=0.1,
         alpha0=np.full(network.n_assets, 0.05),
-        kappa=np.full(network.n_assets, 0.001),
         beta=np.full(network.n_assets, 6.0),
         c_ren=np.full(network.n_assets, 500.0),
         c_rep=np.full(network.n_assets, 100.0),
+        asset_lengths_m=np.full(network.n_assets, 200.0),
+        risk_base=10_000.0,
+        restrict_degrad_multiplier=0.5,
         T=10,   # short episode so tests run fast
     )
     return InfraEnv(network, tap, cfg, rng_seed=0)

@@ -2,26 +2,30 @@
   "network": "sioux_falls",
   "tap_backend": "fast",
   "seed": 42,
-  "run_name": "i10p_seq_rollout_policy",
+  "run_name": "exp0/i10p_seq_rollout_policy",
   "instance": "instances/instance_10p.json",
   "training": {
     "n_episodes": 5,
     "n_eval_episodes": 50,
-    "n_workers": 8
+    "n_workers": 16
   },
   "agent": {
     "agent_type": "sequential_rollout",
     "extra": {
       "n_rollouts": 20,
       "action_threshold": 0.5,
-      "max_steps": 100,
+      "rollout_selection": "adaptive",
+      "p_threshold": 0.02,
+      "min_rollouts": 20,
+      "max_rollouts": 100,
       "initial_action": "policy",
       "rollout_policy": {
         "agent_type": "reactive",
         "threshold": 0.999974841735008,
         "repair_threshold": 0.9243058034470608,
         "restrict_threshold": 0.3342102412249225
-      }
+      },
+      "rollout_horizon": 100
     }
   }
 }

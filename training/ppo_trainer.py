@@ -265,16 +265,37 @@ class PPOTrainer:
     # Evaluation
     # ------------------------------------------------------------------
 
-    def evaluate(self, n_episodes: int | None = None,
-                 env: InfraEnv | None = None) -> dict:
-        """Greedy rollout using agent.act() (argmax)."""
+    def evaluate(self, n_episodes: int | None = None, resume: bool = False,
+                 save_episodes: bool = False, env: InfraEnv | None = None) -> dict:
+        """Greedy rollout using agent.act() (argmax).
+
+        Signature and persistence protocol mirror ``Trainer.evaluate`` so PPO
+        runs are directly comparable (paired CRN) to the value-based agents:
+
+        * Full env  → shared-CRN ``"evaluation"`` phase (omits agent identity →
+          identical episodes per seed across all agents) and the full
+          ``T + tail_epochs`` horizon (no break on ``done`` at ``t = T``).
+        * Curriculum (NullTAP simplified) env → internal ``"curriculum_eval"``
+          diagnostic, never persisted.
+
+        When ``save_episodes=True`` each completed episode is written to
+        ``eval_episodes.csv`` incrementally via the same ``RunLogger`` calls
+        (``start_eval`` / ``append_episode`` / ``append_agent_metrics``) used by
+        ``Trainer.evaluate``. ``resume=True`` skips already-completed episodes.
+        Returns ``{'mean_cost', 'std_cost', 'episodes'}`` (discounted-per-episode
+        costs, per-epoch gamma = gamma_annual ** dt).
+        """
         if n_episodes is None:
             n_episodes = self.config.n_eval_episodes
         env = env or self.env
 
         # Full env → shared-CRN "evaluation" namespace (paired with ADP/rollout/
         # optuna). Curriculum (NullTAP simplified) env → internal diagnostic.
-        eval_phase = "evaluation" if env is self.env else "curriculum_eval"
+        is_full_env = env is self.env
+        eval_phase = "evaluation" if is_full_env else "curriculum_eval"
+        # Only persist for the real (full-env) evaluation; the curriculum
+        # diagnostic eval is never written to eval_episodes.csv.
+        persist = bool(save_episodes) and is_full_env
 
         # Evaluation horizon = T + tail_epochs (horizon_rollout), matching the
         # standard Trainer / optuna evaluators so PPO is directly comparable.
@@ -282,18 +303,42 @@ class PPOTrainer:
         eval_length = env.config.T + tail_epochs
 
         agent = self.agent
+        gamma = env.config.gamma
+
+        # Resume: detect already-completed episodes (same protocol as Trainer).
+        completed = 0
+        prior_costs: list[float] = []
+        if resume and persist:
+            completed = self.logger.count_completed_eval_episodes()
+            if completed > 0:
+                print(f"Resuming evaluation: {completed}/{n_episodes} episodes already done")
+                prior_costs = self.logger.load_eval_episode_costs(gamma)
+        remaining = n_episodes - completed
+
+        if remaining <= 0:
+            episode_costs = prior_costs[:n_episodes]
+            return {
+                'mean_cost': float(np.mean(episode_costs)),
+                'std_cost': float(np.std(episode_costs)),
+                'episodes': [],
+            }
+
+        if persist:
+            self.logger.start_eval(append=(completed > 0))
+
         episode_costs = []
         episodes = []
 
-        for ep_idx in tqdm(range(n_episodes), desc="Evaluating", unit="ep"):
+        for i in tqdm(range(remaining), desc="Evaluating", unit="ep"):
+            ep_idx = completed + i
             env.begin_episode(eval_phase, ep_idx)
             state = env.reset()
             total_cost = 0.0
-            gamma = env.config.gamma
             ep_data = []
 
             for t in range(eval_length):
                 action = agent.act(state)
+                _step_metrics = dict(getattr(agent, 'step_metrics', None) or {})
                 next_state, cost, done = env.step(state, action)
                 c_travel, c_maint, c_risk = env.last_cost_breakdown
                 total_cost += (gamma ** t) * cost
@@ -301,15 +346,20 @@ class PPOTrainer:
                     't': t, 'state': state.copy(), 'action': action,
                     'cost': cost, 'c_travel': c_travel,
                     'c_maint': c_maint, 'c_risk': c_risk,
+                    'agent_metrics': _step_metrics,
                 })
                 state = next_state
                 # No break on `done`: simulate the full T + tail_epochs horizon.
 
+            if persist:
+                self.logger.append_episode(ep_idx, ep_data)
+                self.logger.append_agent_metrics(ep_idx, ep_data)
             episode_costs.append(total_cost)
             episodes.append(ep_data)
 
+        all_costs = prior_costs + episode_costs
         return {
-            'mean_cost': float(np.mean(episode_costs)),
-            'std_cost': float(np.std(episode_costs)),
+            'mean_cost': float(np.mean(all_costs)),
+            'std_cost': float(np.std(all_costs)),
             'episodes': episodes,
         }

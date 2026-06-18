@@ -9,9 +9,17 @@ budget) and [../EXPERIMENTS.md](../EXPERIMENTS.md) (experiment plan).
 
 ## `n_workers` — intra-run parallelism
 
-- **Learner configs set `"n_workers": 8`** on Snellius (in the `training` block). HyperQueue reserves a
-  matching 8 cores per task: `hq submit ... --cpus=8`. The two numbers **must agree** — `n_workers`
-  controls Python-level parallelism, `--cpus` controls the cores HQ pins to the task.
+- **DEFAULT (as of 2026-06-18): learner configs set `"n_workers": 16`, submitted with
+  `--cpus-per-task=16`.** Rationale: Snellius's **minimum shareable slot is 16 cores** (1/8 of a
+  128-core node; "a node can be shared by up to 8 jobs"), so 16 cores is the smallest unit you are
+  billed for **regardless** of what you request — asking for 8 still allocates/bills a 16-core slot,
+  leaving 8 cores idle. So we use all 16. Do **not** set `--mem-per-cpu` (the default 1792 MiB/core →
+  ~28 GiB keeps billing at the 16-core tier; an explicit `2G` pushes 16×2 GiB = 32 GiB into the
+  32-core/1.4-node billing tier — a silent 2× overcharge). `n_workers` (Python parallelism) and
+  `--cpus-per-task` (cores the job gets) **must agree**.
+- This replaces the earlier 8-worker / `--cpus=8` default (the HyperQueue-era setting). Configs and
+  `configs/gen_phase1_adp_grid.py` now emit `n_workers: 16`; `hpc/submit_array.sh` uses
+  `--cpus-per-task=16` and no `--mem-per-cpu`.
 - **Optuna heuristic search is single-threaded — `"n_workers": 1`, submit with `--cpus=1`.**
   `OptunaHeuristicTrainer` (`experiments/optuna_heuristic_search.py`) runs `study.optimize` with no
   `n_jobs` (one trial at a time), evaluates each trial's tuning episodes in a plain loop, and runs the

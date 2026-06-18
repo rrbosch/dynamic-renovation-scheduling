@@ -1,170 +1,165 @@
 # Snellius Run Manual
 
-Step-by-step commands for running experiments on Snellius via SLURM + HyperQueue.
+Step-by-step commands for running experiments on Snellius via a **native SLURM job array**
+(`hpc/submit_array.sh`). No HyperQueue: there is no server/worker daemon to keep alive, so the run
+**survives SSH/app disconnects** (a login-node HQ server dying is what killed an earlier run). The
+older HQ-based workflow is preserved in `snellius_manual_old.md`.
+
+Partition / sharing / QOS facts (why a 29-task array runs fully concurrent with no node waste) are in
+`hpc/snellius_reference.md`.
 
 ---
 
 ## Quick Start
 
-All commands from a login node, assuming venv and code are already set up:
+From a login node, with the venv and code already in place:
 
 ```bash
-module load 2023
-module load HyperQueue/0.19.0
 cd ~/Code_v2/
-nohup hq server start &
-python3 -c "import json; r=json.load(open('hpc/registry.json')); print(len(r), 'experiments'); print(f'  -> array index: 0-{len(r)-1}')"
-hq submit --array 0-19 --cpus=8 --pin taskset hpc/hq_task.sh   # replace 19 with last index
-sbatch hpc/submit.sh
+sbatch --array=1     hpc/submit_array.sh    # smoke test: one ADP config
+sbatch --array=0-28  hpc/submit_array.sh    # full Exp-0B (PPO + 24 ADP + 4 rollout)
+squeue -u $USER                             # watch it run
 ```
+
+Results land in `results/exp0/<run_name>/`. That's it — no `hq`, no separate worker job, no server.
 
 ---
 
 ## 1. One-time: Python environment
 
-Only needed the very first time (or after a Python module change).
+Only the first time (or after a Python-module change):
 
 ```bash
 module load 2023
 module load Python/3.11.3-GCCcore-12.3.0
 
-# Create venv (skip if ~/.local/venv/ already exists)
-python3 -m venv ~/.local/venv
-
-# Activate and install dependencies
+python3 -m venv ~/.local/venv          # skip if ~/.local/venv/ already exists
 source ~/.local/venv/bin/activate
 cd ~/Code_v2/
 pip install -r requirements.txt
 ```
 
----
-
-## 2. Start the HyperQueue server
-
-The HQ server runs on the login node and persists across sessions.
-
-```bash
-module load 2023
-module load HyperQueue/0.19.0
-
-nohup hq server start &
-hq server info            # verify
-```
+(The array script loads these modules and activates this venv itself per task — you don't need to
+activate it just to submit.)
 
 ---
 
-## 3. Verify all code is up-to-date, upload configs and registry
+## 2. Sync code, configs, and registry from your laptop
 
-Make sure the latest code, config files, and registry are synced to Snellius:
+Run on your **laptop**. `rsync` is preferred (skips `results/` and caches):
 
 ```bash
-# Run this on your laptop:
-scp -r agents/ experiments/ env/ training/ utils/ hpc/ configs/ <username>@snellius.surf.nl:~/Code_v2/
-scp hpc/registry.json <username>@snellius.surf.nl:~/Code_v2/hpc/registry.json
+rsync -av --delete \
+  --exclude 'results/' --exclude '__pycache__/' --exclude '.git/' \
+  agents/ experiments/ env/ training/ utils/ hpc/ configs/ instances/ \
+  <username>@snellius.surf.nl:~/Code_v2/
 ```
 
-Alternatively, regenerate the registry directly on Snellius (picks up any status changes):
+Make sure these in particular are current: all `configs/i10p_*.json` (their `run_name` is `exp0/…`),
+`hpc/registry.json`, `hpc/submit_array.sh`, and any code you changed.
+
+---
+
+## 3. The registry and the index map
+
+`hpc/submit_array.sh` runs one registry entry per array element via
+`python hpc/run_task.py --expe_id=$SLURM_ARRAY_TASK_ID`. The index → config mapping
+(`hpc/registry.json`, 32 entries):
+
+| Index | Configs |
+|---|---|
+| `0` | `i10p_ppo_curriculum` |
+| `1-24` | the 24 ADP grid configs |
+| `25-28` | the 4 MC-rollout configs |
+| `29-31` | optuna 0A heuristics — **already done, do NOT re-run** |
+
+Count / inspect:
 
 ```bash
-cd ~/Code_v2/
+python3 -c "import json; r=json.load(open('hpc/registry.json')); print(len(r),'entries'); [print(i, r[i]['config']) for i in (0,24,25,28)]"
+```
+
+To regenerate the registry (single replication for Exp 0):
+
+```bash
 source ~/.local/venv/bin/activate
-python hpc/generate_registry.py   # interactive: select configs + seeds
+python hpc/generate_registry.py --configs "configs/i10p_*.json"      # add --seeds 0 1 2 3 4 for Exp 1+
 ```
 
 ---
 
-## 4. Count experiments
+## 4. Submit the array
+
+The `#SBATCH` defaults are baked into `hpc/submit_array.sh`
+(`--array=0-28`, `--cpus-per-task=16`, `--time=28:00:00`, `--partition=rome`; no `--mem-per-cpu`).
+16 cores = the Snellius minimum shareable slot (1/8 node), so it's the smallest billed unit anyway —
+`n_workers=16` uses it fully. (See `hpc/registry_conventions.md`.)
+A CLI `--array` overrides the directive, so:
 
 ```bash
-python3 -c "import json; r=json.load(open('hpc/registry.json')); print(len(r), 'experiments'); print(f'  -> array index: 0-{len(r)-1}')"
+# Smoke test ONE config first (confirm it starts fresh + writes results/exp0/...):
+sbatch --array=1 hpc/submit_array.sh
+
+# Full run:
+sbatch --array=0-28 hpc/submit_array.sh
+
+# Any subset is fine, e.g. just the rollout configs:
+sbatch --array=25-28 hpc/submit_array.sh
 ```
 
-Example output:
-```
-25 experiments
-  -> array index: 0-24
-```
+`sbatch` prints a `<jobid>`. All 29 elements run concurrently (QOS allows up to 128/user; single-node
+jobs share nodes, so no whole-node waste). **Walltime is 28h** — longer than the 24h training
+`time_budget` so the final evaluation (`experiments/run.py` → `trainer.evaluate(save_episodes=True)`)
+completes and writes `eval_episodes.csv`. A run that is cut off *before* that final eval produces no
+eval file.
 
 ---
 
-## 5. Submit the HQ task array
-
-Replace `24` with your actual last index (N-1):
+## 5. Monitor
 
 ```bash
-hq submit --array 0-24 --cpus=8 --pin taskset hpc/hq_task.sh
+squeue -u $USER                                              # queued / running array elements
+sacct -j <jobid> --format=JobID,State,Elapsed,MaxRSS%12     # per-element state (RUNNING/COMPLETED/TIMEOUT/FAILED)
+tail -f "hpc/logs/slurm_<jobid>_1.out"                       # live log for array task 1
+grep -l "Resuming from checkpoint" hpc/logs/slurm_<jobid>_*.out   # which tasks resumed vs started fresh
 ```
 
-Note the returned `<job_id>` — you'll use it for monitoring.
+Per-task stdout/stderr: `hpc/logs/slurm_%A_%a.out` / `.err` (`%A`=array job id, `%a`=task index).
+Per-run output: `results/exp0/<run_name>/` (config, checkpoints, `training_log.csv`,
+`eval_episodes.csv`).
+
+**Disconnect test:** after submitting, close your session and reconnect — `squeue -u $USER` still
+shows the array. That's the whole point of dropping the HQ server.
 
 ---
 
-## 6. Submit the SLURM job (spawns workers)
+## 6. Resume after a timeout or partial failure
+
+Runs checkpoint periodically (default every 30 min) and auto-resume on the **same config**: resubmit
+the array and each incomplete run continues from its latest checkpoint (`auto_resume=True`, keyed on
+`config_hash`). To avoid re-running ones that already finished, resubmit only the unfinished indices:
 
 ```bash
-sbatch hpc/submit.sh
+# Identify finished runs (have a complete checkpoint / eval_episodes.csv):
+ls results/exp0/*/eval_episodes.csv 2>/dev/null
+
+# Resubmit only the indices that didn't finish, e.g.:
+sbatch --array=3,7,12-14 hpc/submit_array.sh
 ```
 
-Check it was queued:
-
-```bash
-squeue -u $USER
-```
-
-Once SLURM starts the job, the HQ worker connects to the server and tasks begin executing.
+No work is lost — resumed runs pick up their episode counter and elapsed time from the checkpoint.
 
 ---
 
-## 7. Monitor progress
+## 7. Pull results back
+
+On your **laptop**:
 
 ```bash
-hq job list                              # all HQ jobs and their status
-hq job progress <job_id>                 # live progress bar for a specific job
-hq task list <job_id> | grep FAILED      # show failed tasks
-hq task list <job_id> | grep WAITING     # show tasks still in queue
+rsync -av <username>@snellius.surf.nl:~/Code_v2/results/exp0/ "results/exp0/"
 ```
 
-SLURM logs (stdout/stderr per SLURM job):
-
-```bash
-ls hpc/logs/
-tail -f hpc/logs/slurm_<slurm_job_id>.out
-```
-
-Per-task output goes to `results/<run_name>/` as usual.
-
----
-
-## 8. After all tasks complete
-
-```bash
-hq job list --all                        # confirm all tasks finished
-ls results/                              # check result directories exist
-hq server stop                           # shut down HQ server when fully done
-```
-
----
-
-## 9. Resuming after timeout or partial failure
-
-If the SLURM job times out before all tasks finish (or some tasks failed):
-
-```bash
-# Re-generate registry — already-finished runs are skipped automatically
-python hpc/generate_registry.py   # interactive, or:
-python hpc/generate_registry.py --configs configs/exp1_*.json --seeds 0 1 2 3 4
-
-# Count remaining experiments and resubmit (steps 4-6 above)
-```
-
-The trainer auto-resumes from the latest checkpoint, so no work is lost.
-
-To inspect which tasks failed and why:
-
-```bash
-hq task list <job_id> --filter failed
-# Then check the corresponding results/ directory for partial output
-```
+Then analyze locally (paired-CRN comparison vs the tuned reactive heuristic baseline).
 
 ---
 
@@ -172,11 +167,11 @@ hq task list <job_id> --filter failed
 
 | Action | Command |
 |---|---|
-| Check HQ server | `hq server info` |
-| Start HQ server | `nohup hq server start &` |
+| Sync code up (laptop) | `rsync -av --exclude results/ … snellius:~/Code_v2/` |
 | Count registry entries | `python3 -c "import json; print(len(json.load(open('hpc/registry.json'))))"` |
-| Submit task array | `hq submit --array 0-{N-1} --cpus=8 --pin taskset hpc/hq_task.sh` |
-| Submit SLURM workers | `sbatch hpc/submit.sh` |
-| Monitor | `hq job progress <job_id>` |
-| Cancel all tasks | `hq job cancel all` |
-| Stop HQ server | `hq server stop` |
+| Smoke test one config | `sbatch --array=1 hpc/submit_array.sh` |
+| Submit full 0B | `sbatch --array=0-28 hpc/submit_array.sh` |
+| Watch queue | `squeue -u $USER` |
+| Per-element state | `sacct -j <jobid> --format=JobID,State,Elapsed` |
+| Cancel | `scancel <jobid>` (or `scancel -u $USER`) |
+| Pull results (laptop) | `rsync -av snellius:~/Code_v2/results/exp0/ results/exp0/` |

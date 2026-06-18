@@ -20,12 +20,19 @@ VFA = {"xgb": "xgboost", "nn": "neural"}
 INIT = ["empty", "policy"]
 
 # Warmstart episodes for the 'policy' (heuristic-initialised) variants.
+# NB: this warmstart block is a PLACEHOLDER (threshold 0.95). The real run uses the Exp-0A
+# tuned reactive params, injected post-hoc via experiments/apply_optuna_params.py. Re-running
+# this generator OVERWRITES the policy configs and reverts that injection — so after any
+# regeneration you MUST re-inject:
+#   python experiments/apply_optuna_params.py \
+#       --params results/exp0/i10p_optuna_reactive/best_params.json \
+#       --targets "configs/i10p_adp_*_policy_*.json" --block warmstart
 WARMSTART_EPISODES = 1667
 WARMSTART = {"agent_type": "reactive", "extra": {"threshold": 0.95}}
 
 
 def make_config(ag, init, buf, vfa):
-    run_name = f"i10p_adp_{ag}_{init}_{buf}_{vfa}"
+    run_name = f"exp0/i10p_adp_{ag}_{init}_{buf}_{vfa}"  # exp0/ groups results under results/exp0/
     training = {
         "time_budget": 86400,
         "eval_interval": 1000000,
@@ -34,7 +41,7 @@ def make_config(ag, init, buf, vfa):
         "buffer_capacity": 200000,
         "buffer_strategy": BUFFER[buf],
         "n_eval_episodes": 10,
-        "n_workers": 8,  # Snellius: parallel episode collection (see hpc/registry_conventions.md)
+        "n_workers": 16,  # Snellius default: fills the 16-core min slot (see hpc/registry_conventions.md)
     }
     if init == "policy":
         training["n_warmstart_episodes"] = WARMSTART_EPISODES
@@ -61,7 +68,7 @@ def main():
             for buf in BUFFER:
                 for vfa in VFA:
                     cfg = make_config(ag, init, buf, vfa)
-                    path = OUT / f"{cfg['run_name']}.json"
+                    path = OUT / f"{cfg['run_name'].split('/')[-1]}.json"  # filename = stem, no exp0/ prefix
                     path.write_text(json.dumps(cfg, indent=2) + "\n")
                     n += 1
     print(f"Wrote {n} ADP grid configs to {OUT}")
