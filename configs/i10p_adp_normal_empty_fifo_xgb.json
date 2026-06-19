@@ -7,8 +7,9 @@
   "training": {
     "time_budget": 86400,
     "eval_interval": 1000000,
+    "eval_interval_seconds": 3600,
     "update_interval": 50,
-    "truncation_mode": "bootstrap",
+    "truncation_mode": "horizon_rollout",
     "buffer_capacity": 200000,
     "buffer_strategy": "fifo",
     "n_eval_episodes": 10,

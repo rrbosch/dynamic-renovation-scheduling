@@ -129,6 +129,32 @@ class NeuralValueFn(ValueFn):
         self._optimizer = None
         self._input_dim: int | None = None
         self.finite_horizon = finite_horizon
+        # Standardization stats. The targets here are euro cost-to-go values of
+        # magnitude ~1e9-1e11 and the input columns span very different scales
+        # (d in [0,1], n_fail / t up to T). A plain-MSE MLP with grad clipping
+        # cannot fit raw targets of that magnitude (loss ~1e22, clipped grads
+        # never move the net -> predictions collapse to a near-constant, which
+        # makes the action generator unable to rank candidates -> do-nothing
+        # policy). Tree models (XGBoost) are scale-invariant and so do not need
+        # this. We z-score inputs and targets at fit time and invert on predict.
+        # Stats are frozen on the FIRST fit() call so the persistent network
+        # (reused across the many small fit() calls in the training loop) always
+        # sees a consistent input scaling and target space.
+        self._x_mean = None
+        self._x_std = None
+        self._y_mean: float | None = None
+        self._y_std: float | None = None
+        self._stats_frozen: bool = False
+
+    def _freeze_stats(self, X: np.ndarray, y: np.ndarray) -> None:
+        self._x_mean = X.mean(axis=0)
+        x_std = X.std(axis=0)
+        x_std[x_std < 1e-8] = 1.0  # guard constant columns (e.g. h all-zero early)
+        self._x_std = x_std
+        self._y_mean = float(y.mean())
+        y_std = float(y.std())
+        self._y_std = y_std if y_std > 1e-8 else 1.0
+        self._stats_frozen = True
 
     def _build(self, input_dim: int) -> None:
         import torch
@@ -148,9 +174,18 @@ class NeuralValueFn(ValueFn):
         import torch
         if self._model is None:
             return np.zeros(len(states))
-        X = torch.tensor(self._feats(states), dtype=torch.float32)
+        X = self._feats(states)
+        if self._stats_frozen:
+            X = (X - self._x_mean) / self._x_std
+        X_t = torch.tensor(X, dtype=torch.float32)
         with torch.no_grad():
-            return self._model(X).squeeze(-1).numpy()
+            preds = self._model(X_t).squeeze(-1).numpy()
+        if self._stats_frozen:
+            preds = preds * self._y_std + self._y_mean
+        # Cost-to-go is non-negative; clamp like XGBoostValueFn to avoid the
+        # action generator being misled by spurious negative values.
+        preds = np.maximum(preds, 0.01)
+        return preds
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> None:
         import torch
@@ -159,8 +194,16 @@ class NeuralValueFn(ValueFn):
         if self._model is None:
             self._build(X.shape[1])
 
-        X_t = torch.tensor(X, dtype=torch.float32)
-        y_t = torch.tensor(y, dtype=torch.float32)
+        # Freeze input/target standardization stats on the first fit, then reuse
+        # them for the lifetime of this (persistent) network. See __init__ note.
+        if not self._stats_frozen:
+            self._freeze_stats(X, y)
+
+        Xn = (X - self._x_mean) / self._x_std
+        yn = (y - self._y_mean) / self._y_std
+
+        X_t = torch.tensor(Xn, dtype=torch.float32)
+        y_t = torch.tensor(yn, dtype=torch.float32)
 
         dataset = torch.utils.data.TensorDataset(X_t, y_t)
         loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
@@ -183,13 +226,26 @@ class NeuralValueFn(ValueFn):
             'hidden_dims': self.hidden_dims,
             'lr': self.lr,
             'input_dim': self._input_dim,
+            'stats_frozen': self._stats_frozen,
+            'x_mean': self._x_mean,
+            'x_std': self._x_std,
+            'y_mean': self._y_mean,
+            'y_std': self._y_std,
         }, path)
 
     def load(self, path: str) -> None:
         import torch
-        data = torch.load(path)
+        # weights_only=False: checkpoint stores numpy standardization stats
+        # (x_mean/x_std/...) alongside tensors. These are locally produced,
+        # trusted files; torch>=2.6 defaults weights_only=True which rejects them.
+        data = torch.load(path, weights_only=False)
         self.hidden_dims = data['hidden_dims']
         self.lr = data['lr']
+        self._stats_frozen = data.get('stats_frozen', False)
+        self._x_mean = data.get('x_mean')
+        self._x_std = data.get('x_std')
+        self._y_mean = data.get('y_mean')
+        self._y_std = data.get('y_std')
         if data['state_dict'] is not None:
             self._build(data['input_dim'])
             self._model.load_state_dict(data['state_dict'])

@@ -78,11 +78,20 @@ def _run_train_episode(args):
         )
         ep_transitions.append(tr)
         state = next_state
-        if done:
+        # horizon_rollout simulates the tail in training too (to T + tail_epochs), so do
+        # NOT stop at the planning-horizon `done` (= t=T) in that mode; other modes stop at T.
+        if done and truncation_mode != 'horizon_rollout':
             break
     # MC backward pass
     if truncation_mode == 'bootstrap' and hasattr(agent, 'value_fn'):
-        G = agent.value_fn.predict([ep_transitions[-1].post_state])[0]
+        # Bootstrap the tail as a STATIONARY value (CLAUDE.md §2): treat the terminal
+        # post-decision state as t=0 so V' returns the full ongoing cost-to-go rather
+        # than the end-of-finite-horizon value at t=T. NOTE: on instance_10p this does
+        # not improve cost-to-go ranking (the foresight ceiling is the binding limit,
+        # not the bootstrap anchor) — see docs/i10p_predictability_analysis.md.
+        boot_state = ep_transitions[-1].post_state.copy()
+        boot_state.t = 0
+        G = agent.value_fn.predict([boot_state])[0]
     elif truncation_mode == 'none':
         G = 0.0
     else:
@@ -121,6 +130,11 @@ class TrainingConfig:
     time_budget: float = 3600.0   # wall-clock seconds; 0 or None disables
     n_episodes: int | None = None  # None = unlimited when time_budget set, else 10_000_000
     eval_interval: int = 50
+    eval_interval_seconds: float = 0.0   # 0 = disabled; run a periodic eval every N wall-clock
+                                         # seconds and log the policy-improvement curve to
+                                         # training_log.csv. Episode-based eval_interval is
+                                         # unreliable under a wall-clock time_budget (episode
+                                         # count is data-dependent), so prefer this for long runs.
     update_interval: int = 10
     truncation_mode: str = 'bootstrap'  # 'none', 'horizon_rollout', or 'bootstrap'
     T_tail: float = 10.0                # tail horizon in years (converted to epochs via T_tail/dt)
@@ -408,6 +422,7 @@ class Trainer:
 
         t_start = time.monotonic()
         self._last_checkpoint_wall = already_elapsed  # reset clock relative to resume point
+        self._last_eval_wall = already_elapsed        # wall-clock anchor for periodic eval
         use_budget = bool(cfg.time_budget)
         # Remaining budget accounts for time already spent before this call
         remaining_budget = max(0.0, cfg.time_budget - already_elapsed) if use_budget else 0.0
@@ -469,14 +484,21 @@ class Trainer:
                 self.buffer.add(tr)
                 state = next_state
 
-                if done:
+                # horizon_rollout simulates the tail in training too (to T + tail_epochs),
+                # so don't stop at the planning-horizon `done` (= t=T) in that mode.
+                if done and cfg.truncation_mode != 'horizon_rollout':
                     break
 
             # Compute MC returns (backward pass)
             if (cfg.truncation_mode == 'bootstrap'
                     and hasattr(self.agent, 'value_fn')
                     and len(ep_transitions) > 0):
-                G = self.agent.value_fn.predict([ep_transitions[-1].post_state])[0]
+                # Bootstrap the tail as a STATIONARY value (CLAUDE.md §2): treat the
+                # terminal post-decision state as t=0 so V' returns the full ongoing
+                # cost-to-go, not the end-of-finite-horizon value at t=T.
+                boot_state = ep_transitions[-1].post_state.copy()
+                boot_state.t = 0
+                G = self.agent.value_fn.predict([boot_state])[0]
             elif cfg.truncation_mode == 'none':
                 G = 0.0
             else:  # horizon_rollout
@@ -506,6 +528,9 @@ class Trainer:
                 print(f"Episode {ep+1:4d} | {elapsed:6.0f}s | "
                       f"mean_cost={results['mean_cost']:.2f} "
                       f"± {results['std_cost']:.2f}")
+
+            # Wall-clock-gated periodic eval (policy-improvement curve)
+            self._maybe_periodic_eval(ep + 1, t_start, already_elapsed, cfg)
 
             # Checkpoint
             if cfg.checkpoint_interval_seconds > 0:
@@ -576,6 +601,9 @@ class Trainer:
                       f"mean_cost={results['mean_cost']:.2f} "
                       f"± {results['std_cost']:.2f}")
 
+            # Wall-clock-gated periodic eval (policy-improvement curve)
+            self._maybe_periodic_eval(ep, t_start, already_elapsed, cfg)
+
             # Checkpoint
             if cfg.checkpoint_interval_seconds > 0:
                 elapsed = already_elapsed + (time.monotonic() - t_start)
@@ -585,6 +613,28 @@ class Trainer:
             elif cfg.checkpoint_interval > 0 and ep % cfg.checkpoint_interval == 0:
                 elapsed = already_elapsed + (time.monotonic() - t_start)
                 self._save_checkpoint(ep, elapsed)
+
+    def _maybe_periodic_eval(self, ep, t_start, already_elapsed, cfg) -> None:
+        """Wall-clock-gated policy eval logged to training_log.csv.
+
+        Gives a policy-improvement curve over a long time-budget run, where the
+        episode-based eval_interval is unreliable (episode count is data-dependent).
+        No-op unless cfg.eval_interval_seconds > 0.
+        """
+        if cfg.eval_interval_seconds <= 0:
+            return
+        elapsed = already_elapsed + (time.monotonic() - t_start)
+        if elapsed - self._last_eval_wall < cfg.eval_interval_seconds:
+            return
+        self._last_eval_wall = elapsed
+        results = self.evaluate(cfg.n_eval_episodes)
+        self.logger.log_step(ep, {
+            'elapsed_seconds': round(elapsed, 1),
+            'mean_cost': results['mean_cost'],
+            'std_cost': results['std_cost'],
+        })
+        print(f"[periodic eval] ep {ep} | {elapsed:6.0f}s | "
+              f"mean_cost={results['mean_cost']:.3e} ± {results['std_cost']:.3e}")
 
     # ------------------------------------------------------------------
     # Evaluation

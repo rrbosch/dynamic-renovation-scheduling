@@ -273,9 +273,15 @@ class RunLogger:
     def save_eval_predictions(self, episodes, agent, env) -> None:
         """V(s_post) predictions vs realized returns for eval episodes."""
         gamma = env.config.gamma
+        # V'(s_post) is trained with FUTURE-only targets (mc_return - cost), so the
+        # apples-to-apples ground truth is the discounted return EXCLUDING the
+        # current-step cost: realized_future_t = G_t - cost_t = gamma * G_{t+1}.
+        # `realized_return` (incl. current cost) is kept for backward compatibility;
+        # `residual` is now computed against `realized_future`.
         with open(self.run_dir / 'vf_eval_predictions.csv', 'w', newline='') as f:
             writer = csv.DictWriter(
-                f, fieldnames=['episode', 't', 'v_pred', 'realized_return', 'residual'])
+                f, fieldnames=['episode', 't', 'v_pred', 'realized_return',
+                               'realized_future', 'residual'])
             writer.writeheader()
             for ep_idx, ep in enumerate(episodes):
                 costs = [step['cost'] for step in ep]
@@ -285,10 +291,12 @@ class RunLogger:
                 for k in range(T - 1, -1, -1):
                     G = costs[k] + gamma * G
                     realized[k] = G
-                for step, G_t in zip(ep, realized):
+                for step, G_t, c_t in zip(ep, realized, costs):
                     post_state = env.post_decision_state(step['state'], step['action'])
                     vp = float(agent.value_fn.predict([post_state])[0])
+                    realized_future = G_t - c_t
                     writer.writerow({'episode': ep_idx, 't': step['t'],
                                      'v_pred': vp,
                                      'realized_return': G_t,
-                                     'residual': G_t - vp})
+                                     'realized_future': realized_future,
+                                     'residual': realized_future - vp})

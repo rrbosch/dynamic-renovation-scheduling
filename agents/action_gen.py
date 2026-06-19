@@ -25,8 +25,12 @@ class LocalSearchGenerator(ActionGenerator):
     Ranks actions by Q(s,a) = c_maint + c_risk + c_travel + V'(s_post).
     """
 
-    def __init__(self, n_restarts: int = 1):
+    def __init__(self, n_restarts: int = 1, log_q_breakdown: bool = False):
         self.n_restarts = n_restarts
+        # Opt-in diagnostic: when True, last_metrics carries the Q-component
+        # decomposition (c_maint/c_risk/c_travel/V') for the chosen action vs the
+        # do-nothing baseline at every decision. Off by default (zero overhead).
+        self.log_q_breakdown = log_q_breakdown
         self.last_metrics: dict = {}
 
     def generate(self, state: State, value_fn: ValueFn, env: InfraEnv,
@@ -66,6 +70,9 @@ class LocalSearchGenerator(ActionGenerator):
                 best_action = current_action
 
         self.last_metrics = {'n_candidates': self._n_candidates}
+        if self.log_q_breakdown:
+            self.last_metrics.update(
+                _q_breakdown_metrics(state, best_action, value_fn, env))
         return best_action
 
     def _evaluate_q(self, state: State, action: np.ndarray,
@@ -89,7 +96,8 @@ class SequentialGenerator(ActionGenerator):
     Ranks by Q(s,a) = c_maint + c_risk + c_travel + V'(s_post).
     """
 
-    def __init__(self):
+    def __init__(self, log_q_breakdown: bool = False):
+        self.log_q_breakdown = log_q_breakdown
         self.last_metrics: dict = {}
 
     def generate(self, state: State, value_fn: ValueFn, env: InfraEnv,
@@ -124,7 +132,49 @@ class SequentialGenerator(ActionGenerator):
             action[i] = candidates[best_idx][0]
 
         self.last_metrics = {'n_candidates': count}
+        if self.log_q_breakdown:
+            self.last_metrics.update(
+                _q_breakdown_metrics(state, action, value_fn, env))
         return action
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic helper (opt-in): per-decision Q-component decomposition
+# ---------------------------------------------------------------------------
+
+def _q_breakdown_metrics(state: State, chosen: np.ndarray,
+                         value_fn: ValueFn, env: InfraEnv) -> dict:
+    """Decompose Q = c_maint + c_risk + c_travel + V'(s_post) for the chosen
+    action vs the do-nothing baseline, plus a compact state summary.
+
+    Reveals whether the greedy argmin is driven by the immediate-cost terms or
+    by V', and whether V' actually discriminates acting from not-acting on the
+    on-policy distribution. ~2 extra TAP calls per decision (usually cached) —
+    negligible next to the dozens local search already performs.
+    """
+    none = np.zeros_like(chosen)
+    sp_none = env.post_decision_state(state, none, check=False)
+    sp_chosen = env.post_decision_state(state, chosen, check=False)
+    m_n, r_n, t_n = env.immediate_cost_components(state, none, sp_none)
+    m_c, r_c, t_c = env.immediate_cost_components(state, chosen, sp_chosen)
+    v_n = float(value_fn.predict([sp_none])[0])
+    v_c = float(value_fn.predict([sp_chosen])[0])
+    return {
+        # chosen-action Q components
+        'q_chosen':    m_c + r_c + t_c + v_c,
+        'cmaint_chosen': m_c, 'crisk_chosen': r_c, 'ctravel_chosen': t_c,
+        'vpost_chosen': v_c,
+        # do-nothing baseline Q components
+        'q_none':      m_n + r_n + t_n + v_n,
+        'crisk_none':  r_n, 'ctravel_none': t_n, 'vpost_none': v_n,
+        # V' spread between acting and not (≈0 ⇒ V' cannot tell them apart)
+        'dvpost_chosen_vs_none': v_c - v_n,
+        # state summary at this decision
+        'n_act':    int(np.count_nonzero(chosen)),
+        'mean_d':   float(state.d.mean()),
+        'max_d':    float(state.d.max()),
+        'n_failed': int(np.count_nonzero((state.d >= env.config.d_fail) & (state.h == 0))),
+    }
 
 
 # ---------------------------------------------------------------------------
