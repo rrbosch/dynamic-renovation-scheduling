@@ -216,6 +216,7 @@ def build_experiment(config: ExperimentConfig):
         time_budget=float(tc_dict.get('time_budget', 3600.0)),
         n_episodes=int(tc_dict.get('n_episodes', 10_000_000)),
         eval_interval=tc_dict.get('eval_interval', 50),
+        eval_interval_seconds=float(tc_dict.get('eval_interval_seconds', 0.0)),
         update_interval=tc_dict.get('update_interval', 10),
         truncation_mode=_trunc_mode,
         T_tail=_T_tail,
@@ -420,7 +421,8 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
     if at in ('adp', 'dqn', 'actor_critic'):
         finite_horizon = extra.get('finite_horizon', True)
         vf = _build_value_fn(agent_config.value_fn, finite_horizon=finite_horizon)
-        ag = _build_action_gen(agent_config.action_gen)
+        ag = _build_action_gen(agent_config.action_gen,
+                               log_q_breakdown=extra.get('log_q_breakdown', False))
 
         from training.trainer import TrainingConfig  # reuse default
 
@@ -439,7 +441,8 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
         from agents.actor_critic import ActorCriticAgent
         input_dim = (5 * env.config.n_assets + 1) if finite_horizon else 5 * env.config.n_assets
         pnet = PolicyNetwork(input_dim=input_dim, n_assets=env.config.n_assets,
-                             hidden_dims=extra.get('hidden_dims', [256, 256]))
+                             hidden_dims=extra.get('hidden_dims', [256, 256]),
+                             T=env.config.T, finite_horizon=finite_horizon)
         return ActorCriticAgent(adp, pnet,
                                 patience=extra.get('patience', 20))
 
@@ -507,7 +510,9 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
         if policy_type == 'nn':
             from agents.fn.policy import PolicyNetwork
             input_dim = 5 * n_assets + (1 if finite_horizon else 0)
-            net    = PolicyNetwork(input_dim, n_assets, extra.get('hidden_dims', [256, 256]))
+            net    = PolicyNetwork(input_dim, n_assets,
+                                   hidden_dims=extra.get('hidden_dims', [256, 256]),
+                                   T=env.config.T, finite_horizon=finite_horizon)
             policy = NNPolicy(net, lr=extra.get('policy_lr', 1e-3))
         else:  # 'xgboost'
             policy = XGBoostPolicy(
@@ -551,13 +556,13 @@ def _build_value_fn(name: str, finite_horizon: bool = True):
     raise ValueError(f"Unknown value_fn: {name!r}")
 
 
-def _build_action_gen(name: str):
+def _build_action_gen(name: str, log_q_breakdown: bool = False):
     if name == 'local_search':
         from agents.action_gen import LocalSearchGenerator
-        return LocalSearchGenerator()
+        return LocalSearchGenerator(log_q_breakdown=log_q_breakdown)
     if name == 'sequential':
         from agents.action_gen import SequentialGenerator
-        return SequentialGenerator()
+        return SequentialGenerator(log_q_breakdown=log_q_breakdown)
     if name == 'bdq':
         from agents.action_gen import BDQGenerator
         return BDQGenerator()

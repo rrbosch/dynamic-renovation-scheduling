@@ -7,8 +7,9 @@
   "training": {
     "time_budget": 86400,
     "eval_interval": 1000000,
+    "eval_interval_seconds": 3600,
     "update_interval": 50,
-    "truncation_mode": "bootstrap",
+    "truncation_mode": "horizon_rollout",
     "buffer_capacity": 200000,
     "buffer_strategy": "stochastic_knockout",
     "n_eval_episodes": 10,
@@ -17,9 +18,7 @@
     "warmstart": {
       "agent_type": "reactive",
       "extra": {
-        "threshold": 0.999974841735008,
-        "repair_threshold": 0.9243058034470608,
-        "restrict_threshold": 0.3342102412249225
+        "threshold": 0.95
       }
     }
   },

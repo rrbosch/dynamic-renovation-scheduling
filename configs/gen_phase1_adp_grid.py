@@ -35,9 +35,11 @@ def make_config(ag, init, buf, vfa):
     run_name = f"exp0/i10p_adp_{ag}_{init}_{buf}_{vfa}"  # exp0/ groups results under results/exp0/
     training = {
         "time_budget": 86400,
-        "eval_interval": 1000000,
+        "eval_interval": 1000000,          # episode-based eval effectively off; use time-based below
+        "eval_interval_seconds": 3600,     # hourly policy eval -> training_log.csv (policy curve)
         "update_interval": 50,
-        "truncation_mode": "bootstrap",
+        "truncation_mode": "horizon_rollout",  # simulate the tail in training (non-circular target);
+                                               # requires the trainer fix that doesn't break at done=T
         "buffer_capacity": 200000,
         "buffer_strategy": BUFFER[buf],
         "n_eval_episodes": 10,

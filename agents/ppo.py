@@ -15,6 +15,39 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# Running mean/std (for return / value normalization)
+# ---------------------------------------------------------------------------
+
+class _RunningMeanStd:
+    """Welford running mean/variance, updated one batch (rollout) at a time."""
+
+    def __init__(self) -> None:
+        self.mean: float = 0.0
+        self.var: float = 1.0
+        self.count: float = 1e-4  # tiny prior count avoids div-by-zero
+
+    def update(self, x: np.ndarray) -> None:
+        x = np.asarray(x, dtype=np.float64)
+        if x.size == 0:
+            return
+        b_mean = float(x.mean())
+        b_var = float(x.var())
+        b_count = x.size
+        delta = b_mean - self.mean
+        tot = self.count + b_count
+        self.mean += delta * b_count / tot
+        m_a = self.var * self.count
+        m_b = b_var * b_count
+        m2 = m_a + m_b + delta * delta * self.count * b_count / tot
+        self.var = m2 / tot
+        self.count = tot
+
+    @property
+    def std(self) -> float:
+        return float(np.sqrt(self.var)) + 1e-8
+
+
+# ---------------------------------------------------------------------------
 # RolloutBuffer
 # ---------------------------------------------------------------------------
 
@@ -162,7 +195,30 @@ class PPOAgent(Agent):
         )
         self.critic = ValueNetwork(input_dim=input_dim, hidden_dims=hidden_dims)
         import torch
+        self._critic_lr = critic_lr  # stored for curriculum_reset_critic in PPOTrainer
         self._critic_opt = torch.optim.Adam(self.critic.parameters(), lr=critic_lr)
+
+        # --- Normalization (see fix note) ---------------------------------
+        # The critic regresses to discounted returns of magnitude ~1e10-1e11
+        # (rewards are -cost in euros). A plain-MSE MLP cannot fit targets of
+        # that scale (loss ~1e20, grad-clipped steps never move the net), so the
+        # critic collapses to a near-constant -> GAE advantages are noise -> the
+        # policy never learns. This is the same scale pathology that broke the
+        # ADP NeuralValueFn. Fix:
+        #   (1) Value normalization: the critic predicts a STANDARDIZED value
+        #       v_norm; raw value = v_norm * ret_std + ret_mean. The running
+        #       return stats are updated once per rollout. Raw values are used
+        #       everywhere GAE needs them (collection, bootstrap); the critic
+        #       MSE loss is computed in normalized space (O(1) targets).
+        #   (2) Input scaling: state.features() mixes columns in [0,1] (d, h,
+        #       ell, r) with n_fail in [0, T]. We rescale the n_fail block by
+        #       1/T so every input column is ~O(1) (t is already normalized in
+        #       _state_to_tensor). Static, stateless, deterministic.
+        self._ret_rms = _RunningMeanStd()
+        feat_scale = np.ones(input_dim, dtype=np.float32)
+        T = max(int(self._env.config.T), 1)
+        feat_scale[4 * n_assets:5 * n_assets] = 1.0 / T  # n_fail block
+        self._feat_scale = feat_scale
 
     # ------------------------------------------------------------------
     # State → tensor
@@ -176,7 +232,20 @@ class PPOAgent(Agent):
             T = self._env.config.T
             t_norm = np.array([state.t / T], dtype=np.float32)
             feat = np.concatenate([feat, t_norm])
+        feat = feat * self._feat_scale  # rescale n_fail block to ~O(1)
         return torch.tensor(feat).unsqueeze(0)
+
+    def _value_raw(self, x: 'torch.Tensor') -> 'torch.Tensor':
+        """Critic value in RAW (euro) units. The critic head outputs a
+        standardized value; we invert the return normalization here so that
+        everything GAE consumes stays in raw reward units."""
+        return self.critic.forward(x) * self._ret_rms.std + self._ret_rms.mean
+
+    def predict_value(self, state: State) -> float:
+        """Raw-unit value estimate for a single state (used for GAE bootstrap)."""
+        import torch
+        with torch.no_grad():
+            return float(self._value_raw(self._state_to_tensor(state)).item())
 
     # ------------------------------------------------------------------
     # Action selection
@@ -202,7 +271,7 @@ class PPOAgent(Agent):
         with torch.no_grad():
             x = self._state_to_tensor(state)
             logits = self.actor.forward(x)[0]           # (N, 4)
-            value = self.critic.forward(x).item()       # scalar
+            value = self._value_raw(x).item()           # scalar, raw euro units
             mask = self._env.feasible_actions(state)    # (N, 4) bool
             logits[~mask] = -1e9
             dist = Categorical(logits=logits)           # N independent
@@ -226,6 +295,14 @@ class PPOAgent(Agent):
         total_entropy = 0.0
         n_updates = 0
 
+        # Update running return stats once per rollout, then train the critic to
+        # predict STANDARDIZED returns (O(1) targets). Stats are frozen for the
+        # duration of this update so the critic head and the (already-collected)
+        # raw value estimates remain mutually consistent.
+        if rollout._returns is not None:
+            self._ret_rms.update(rollout._returns)
+        ret_mean, ret_std = self._ret_rms.mean, self._ret_rms.std
+
         for _ in range(self.ppo_epochs):
             for batch in rollout.mini_batches(self.mini_batch_size):
                 logits = self.actor.forward(batch.states)   # (B, N, 4)
@@ -242,8 +319,11 @@ class PPOAgent(Agent):
                     ratio.clamp(1.0 - self.clip_eps, 1.0 + self.clip_eps) * adv,
                 ).mean()
 
-                values = self.critic.forward(batch.states)  # (B,)
-                l_value = F.mse_loss(values, batch.returns)
+                # Critic predicts standardized values; compare to standardized
+                # returns so the regression target is O(1) (see __init__ note).
+                values = self.critic.forward(batch.states)  # (B,) normalized
+                ret_target = (batch.returns - ret_mean) / ret_std
+                l_value = F.mse_loss(values, ret_target)
 
                 loss = -l_clip + self.value_coef * l_value - self.entropy_coef * entropy
 
@@ -287,7 +367,7 @@ class PPOAgent(Agent):
             dist = Categorical(logits=logits_masked)
             action_t = torch.tensor(action, dtype=torch.long)
             log_prob = dist.log_prob(action_t).sum().item()
-            value = self.critic.forward(x).item()
+            value = self._value_raw(x).item()
         return log_prob, value
 
     # ------------------------------------------------------------------
@@ -302,3 +382,8 @@ class PPOAgent(Agent):
         os.makedirs(path, exist_ok=True)
         torch.save(self.actor._model.state_dict(), os.path.join(path, 'ppo_actor.pt'))
         torch.save(self.critic._model.state_dict(), os.path.join(path, 'ppo_critic.pt'))
+        # Return-normalization stats: needed to interpret the critic's
+        # standardized output in raw units (e.g. for analysis / warm restart).
+        torch.save({'ret_mean': self._ret_rms.mean, 'ret_var': self._ret_rms.var,
+                    'ret_count': self._ret_rms.count},
+                   os.path.join(path, 'ppo_norm.pt'))

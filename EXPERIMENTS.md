@@ -25,6 +25,18 @@ matters. Each step is small enough to be tractable before committing compute to 
 
 ## Experiment 0 — Exploration on `instance_10p`
 
+> **⚠️ Instance regenerated 2026-06-19 — exp0 re-run in progress.** A predictability analysis
+> ([docs/i10p_predictability_analysis.md](docs/i10p_predictability_analysis.md)) found the original
+> `instance_10p` was **noise-dominated**: failure timing was essentially unpredictable (time-to-failure
+> CV ≈ 0.6; current state explained only R²≈0.58 of cost-to-go), which *structurally caps* anticipatory
+> RL — explaining why MC rollout barely beat reactive on the mean. `instance_10p.json` was regenerated
+> to be **anticipatable** (`alpha0_mean` 0.05→0.8 → TTF-CV ≈ 0.22, same 60-yr lifetime); the old one is
+> saved as `instances/instance_10p_noisy_alpha0p05.json`. **The first exp0 results (on the noisy
+> instance) are archived at `results/exp0_noisy_alpha0p05/` — they are the "unpredictable" arm and a
+> finding in their own right** (notably: MC rollout cut outcome-cost **CV 0.74→0.23** — its value was
+> *risk reduction*, not mean anticipation → report CVaR/P90, not just mean). Exp 0 is now being re-run
+> on the predictable instance.
+
 All Exp 0 runs use `instances/instance_10p.json`, Sioux Falls network, `fast` TAP backend.
 Evaluation uses shared CRN across agents (paired comparison), so costs are directly comparable.
 **One replication per config** — exploratory only, no aggregate statistics.
@@ -128,10 +140,17 @@ reactive < paced < perasset unchanged). v2's reactive now uses repair (thr 0.924
 | i10p_optuna_paced | 947M ± 769M | ✅ done |
 | i10p_optuna_perasset | 1125M ± 691M | ✅ done |
 
-### 0b-i. ADP grid — **24/24 built** · 🟢 submitted (array 1-24, stage 0B-1)
-All cells of `{normal,seq} × {empty,policy} × {fifo,lowesterror,knockout} × {xgb,nn}` are in the
-registry. Run names: `i10p_adp_{ag}_{init}_{buf}_{vfa}`. Reactive warmstart injected into the 12
-`*_policy_*` cells.
+### 0b-i. ADP grid — **24/24 built** · ⏳ re-run pending (predictable instance)
+All cells of `{normal,seq} × {empty,policy} × {fifo,lowesterror,knockout} × {xgb,nn}`. Run names:
+`exp0/i10p_adp_{ag}_{init}_{buf}_{vfa}`. Reactive warmstart re-injected into the 12 `*_policy_*` cells
+after the 0A re-tune.
+**Training-mode change for the re-run (2026-06-19):** switched `truncation_mode` `bootstrap →
+horizon_rollout` (non-circular target — the ADP-XGB diagnosis showed bootstrap masks calibration), and
+**fixed the trainer** so horizon_rollout actually simulates the tail in training (it previously broke
+at `done`=T → was identical to `none`; now collects T+tail transitions — verified). Added
+`eval_interval_seconds: 3600` (hourly policy curve to `training_log.csv`) since episode-based eval is
+effectively off. *Noisy-instance ADP was at the foresight ceiling (not buggy) — the predictable
+instance is the real test.*
 
 ### 0b-ii. MC rollout — 4/4 built · ⚠️ first run was buggy → FIXED, needs re-run
 First 0B run produced **pathological ~10B eval (99% risk, do-nothing)**. Root cause (found + fixed):

@@ -86,7 +86,7 @@ def generate_instance(
     seed: int,
     lengths_mean_m: float = 200.0,
     lengths_cv: float = 0.5,
-    alpha0_mean: float = 0.05,
+    alpha0_mean: float = 0.8,
     alpha0_sigma: float = 0.3,
     e_fail_cv: float = 0.10,
     e_fail_mean: float = 60.0,
@@ -110,7 +110,9 @@ def generate_instance(
       alpha0            ~ LogNormal(mean=alpha0_mean, sigma_log=alpha0_sigma)
 
     Stochasticity levers:
-      alpha0_mean   — higher value → tighter Gamma increments per step (same E[fail])
+      alpha0_mean   — higher value → tighter Gamma increments per step (same E[fail]).
+                      Default 0.8 → time-to-failure CV ≈ 0.20 at d=0.5 (anticipatable);
+                      0.05 → CV ≈ 0.6 (failure timing dominated by process noise).
       alpha0_sigma  — 0 → all assets have identical alpha0 (homogeneous degradation shape)
       e_fail_cv     — 0 → all assets have identical expected lifetime
       ren_noise_cv  — 0 → renovation duration is deterministic (σ_h = 0)
@@ -419,8 +421,10 @@ def interactive_mode() -> types.SimpleNamespace:
     alpha0_mean = _prompt_value(
         "alpha0_mean",
         "Mean Gamma shape rate α₀ across assets. Higher → tighter (less noisy) degradation "
-        "increments per step while keeping E[time to fail] = 60 yr unchanged.",
-        default=0.05, type_fn=float, lo=0.0, lo_open=True,
+        "increments per step while keeping E[time to fail] = 60 yr unchanged. Default 0.8 "
+        "gives a time-to-failure CV ≈ 0.20 at d=0.5 (failure timing is anticipatable); "
+        "0.05 gives CV ≈ 0.6 (failure timing dominated by noise).",
+        default=0.8, type_fn=float, lo=0.0, lo_open=True,
     )
     alpha0_sigma = _prompt_value(
         "alpha0_sigma",
@@ -561,8 +565,10 @@ def _parse_args() -> types.SimpleNamespace:
                         help='Multiplicative factor on raw Sioux Falls traffic costs.')
     parser.add_argument('--risk-base', type=float, default=10_000.0,
                         help='Base risk rate (euros/m/year) per failure epoch.')
-    parser.add_argument('--alpha0-mean', type=float, default=0.05,
-                        help='Mean Gamma shape rate alpha0. Higher = less noisy degradation.')
+    parser.add_argument('--alpha0-mean', type=float, default=0.8,
+                        help='Mean Gamma shape rate alpha0. Higher = less noisy degradation '
+                             '(same E[time to fail]). Default 0.8 -> time-to-failure CV ~0.20 '
+                             'at d=0.5; 0.05 -> CV ~0.6 (noise-dominated).')
     parser.add_argument('--alpha0-sigma', type=float, default=0.3,
                         help='Log-scale std of alpha0 across assets. 0 = homogeneous.')
     parser.add_argument('--e-fail-mean', type=float, default=60.0,

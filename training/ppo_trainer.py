@@ -179,7 +179,6 @@ class PPOTrainer:
 
     def _collect_rollout(self, env: InfraEnv | None = None,
                          phase: str = "training", episode_idx: int = 0) -> RolloutBuffer:
-        import torch
         env = env or self.env
         agent = self.agent
 
@@ -202,11 +201,9 @@ class PPOTrainer:
             )
             state = next_state
 
-        # Bootstrap last value
+        # Bootstrap last value (raw euro units, matching rewards/returns).
         if not done:
-            with torch.no_grad():
-                x = agent._state_to_tensor(state)
-                last_value = agent.critic.forward(x).item()
+            last_value = agent.predict_value(state)
         else:
             last_value = 0.0
 

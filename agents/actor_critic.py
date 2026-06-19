@@ -5,7 +5,7 @@ import numpy as np
 
 from agents.base import Agent
 from agents.dqn import ValueBasedAgent
-from agents.fn.policy import PolicyNetwork
+from agents.fn.policy import PolicyNetwork, build_policy_input
 from env.mdp import State
 from training.buffer import Transition
 
@@ -91,7 +91,12 @@ class ActorCriticAgent(Agent):
             a = ag.generate(s, self.dqn_agent.value_fn, env)
             optimal_actions.append(a)
 
-        X = torch.tensor(np.stack([s.features() for s in states]), dtype=torch.float32)
+        pnet = self.policy_network
+        X = torch.tensor(
+            np.stack([build_policy_input(s, pnet.n_assets, pnet.T, pnet.finite_horizon)
+                      for s in states]),
+            dtype=torch.float32,
+        )  # (B, 5N) or (B, 5N+1)
         Y = torch.tensor(np.stack(optimal_actions), dtype=torch.long)  # (B, N)
 
         self.policy_network._model.train()
