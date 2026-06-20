@@ -51,7 +51,7 @@ PPO and Optuna-heuristic agents read additional keys from `training` (e.g.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `agent_type` | string | — | **Required.** `"reactive"`, `"paced"`, `"adp"`, `"dqn"`, `"actor_critic"`, `"ppo"`, `"rollout"`, `"sequential_rollout"`, `"dcl"`, `"optuna_heuristic"`, `"marl"` (stub) |
+| `agent_type` | string | — | **Required.** `"reactive"`, `"paced"`, `"leadtime"`, `"netconcurrency"`, `"holding"`, `"valuedensity"`, `"worstfirst"`, `"adp"`, `"dqn"`, `"actor_critic"`, `"ppo"`, `"rollout"`, `"sequential_rollout"`, `"dcl"`, `"optuna_heuristic"`, `"marl"` (stub) |
 | `value_fn` | string | `"xgboost"` | `"xgboost"`, `"neural"`, `"ranking"` — used by `adp`/`dqn`/`actor_critic` |
 | `action_gen` | string | `"local_search"` | `"local_search"`, `"sequential"`, `"bdq"` (stub) — used by `adp`/`dqn`/`actor_critic` |
 | `extra` | object | `{}` | Agent-type-specific options (see below) |
@@ -74,6 +74,48 @@ PPO and Optuna-heuristic agents read additional keys from `training` (e.g.
 |---|---|---|
 | `threshold` | `0.7` | Condition threshold triggering renovation |
 | `pace_threshold` | `null` | Secondary threshold for pacing logic |
+
+#### `leadtime`
+Predictive renovation keyed on expected remaining life (epochs to `d_fail`) rather than a fixed condition threshold. Priority renovate > repair > restrict.
+| Key | Default | Description |
+|---|---|---|
+| `lead_epochs` | `4.0` | Renovate when expected remaining life ≤ this (epochs) |
+| `repair_lead` | `null` | Repair when remaining life ≤ this and `r==0` (optional) |
+| `restrict_lead` | `null` | Restrict when remaining life ≤ this and `ell==0` (optional) |
+
+#### `netconcurrency`
+Network-aware, concurrency-capped renovation. Candidate priority `d − spread_penalty · normalized_flow` defers busy (high nominal-flow) edges to spread the travel-cost impact. Failed assets forced. Uses a precomputed per-asset nominal-flow proxy (one TAP solve at build).
+| Key | Default | Description |
+|---|---|---|
+| `threshold` | `0.7` | Condition threshold to become a renovation candidate |
+| `max_concurrent` | `3` | Max simultaneous renovations (counts in-progress `h>0`) |
+| `spread_penalty` | `0.0` | Strength of the high-flow deferral penalty |
+
+#### `holding`
+Concurrency-capped renovation with a restrict/repair holding layer: assets in danger (remaining life ≤ `defer_window`) that miss a renovation slot are restricted (low-flow edges) or repaired (rest).
+| Key | Default | Description |
+|---|---|---|
+| `threshold` | `0.7` | Condition threshold triggering renovation |
+| `max_concurrent` | `3` | Max simultaneous renovations |
+| `defer_window` | `4.0` | Remaining-life (epochs) below which holding kicks in |
+| `restrict_flow_quantile` | `0.5` | Flow quantile; ≤ → restrict, > → repair |
+
+#### `valuedensity`
+Bang-per-buck greedy: renovate top-`max_concurrent` by `(risk_weight·n_fail·L·risk_base·dt + degrad_weight·d·L) / c_ren`.
+| Key | Default | Description |
+|---|---|---|
+| `max_concurrent` | `3` | Max simultaneous renovations |
+| `risk_weight` | `1.0` | Weight on the current risk-cost term |
+| `degrad_weight` | `1.0` | Weight on the proximity-to-failure × size term |
+| `threshold` | `0.0` | Minimum condition to be a candidate |
+
+#### `worstfirst`
+Classic worst-first baseline: renovate the most-degraded eligible assets (optionally length-weighted) up to `max_concurrent`.
+| Key | Default | Description |
+|---|---|---|
+| `max_concurrent` | `3` | Max simultaneous renovations |
+| `threshold` | `0.5` | Minimum condition to be a candidate |
+| `use_length` | `true` | Rank by `d·L` (else by `d`) |
 
 #### `adp` / `dqn`
 | Key | Default | Description |
@@ -105,7 +147,7 @@ PPO and Optuna-heuristic agents read additional keys from `training` (e.g.
 | `rollout_selection` | `"adaptive"` | `"fixed"` or `"adaptive"` (sequential Wilcoxon budgeting; see `docs/adaptive_rollout_literature.md`) |
 | `p_threshold`, `min_rollouts`, `max_rollouts`, `rollout_batch` | `0.02`, `20`, `100`, `5` | Adaptive-budget controls |
 
-> Unknown keys under `agent.extra` for `reactive`, `paced`, `rollout`, and `sequential_rollout` are **rejected** with a "did you mean…?" error (`_check_extra_keys` in `configs.py`). This prevents a misspelled/renamed key from being silently ignored and falling back to a default.
+> Unknown keys under `agent.extra` for `reactive`, `paced`, `leadtime`, `netconcurrency`, `holding`, `valuedensity`, `worstfirst`, `rollout`, and `sequential_rollout` are **rejected** with a "did you mean…?" error (`_check_extra_keys` in `configs.py`). This prevents a misspelled/renamed key from being silently ignored and falling back to a default.
 
 #### `dcl`
 | Key | Default | Description |
@@ -121,7 +163,7 @@ PPO and Optuna-heuristic agents read additional keys from `training` (e.g.
 #### `optuna_heuristic`
 | Key | Default | Description |
 |---|---|---|
-| `heuristic_type` | `"reactive"` | `"reactive"`, `"paced"`, or `"reactiveperasset"` |
+| `heuristic_type` | `"reactive"` | `"reactive"`, `"paced"`, `"reactiveperasset"`, `"leadtime"`, `"netconcurrency"`, `"holding"`, `"valuedensity"`, `"worstfirst"` |
 | `param_space` | type-specific default | Optuna search space (overrides built-in defaults) |
 | `n_tuning_episodes` | `30` | Tuning episodes per trial |
 

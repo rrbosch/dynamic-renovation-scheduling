@@ -15,6 +15,18 @@ import hashlib
 import json
 
 
+# Discriminating `extra` keys per direct (fixed-param) heuristic agent_type,
+# used by compute_algorithm_label. Optuna-tuned variants are labelled separately
+# (by n_tune) under the 'optuna_heuristic' branch.
+_DIRECT_HEURISTIC_LABEL_KEYS = {
+    'leadtime':       ('lead_epochs', 'repair_lead', 'restrict_lead'),
+    'netconcurrency': ('threshold', 'max_concurrent', 'spread_penalty'),
+    'holding':        ('threshold', 'max_concurrent', 'defer_window', 'restrict_flow_quantile'),
+    'valuedensity':   ('max_concurrent', 'risk_weight', 'degrad_weight', 'threshold'),
+    'worstfirst':     ('max_concurrent', 'threshold', 'use_length'),
+}
+
+
 def compute_algorithm_class(config_dict: dict) -> str:
     """Human-readable algorithm family name from a config dict."""
     agent = config_dict.get('agent', {})
@@ -101,6 +113,12 @@ def compute_algorithm_label(config_dict: dict) -> str:
     elif at == 'dcl':
         pt = extra.get('policy_type', 'xgboost')
         parts.append(f"pol={pt}")
+    elif at in _DIRECT_HEURISTIC_LABEL_KEYS:
+        for k in _DIRECT_HEURISTIC_LABEL_KEYS[at]:
+            if k in extra:
+                parts.append(f"{k.replace('_threshold', '').replace('threshold', 'thresh')}={extra[k]}")
+        if not parts:
+            parts.append('default')
     else:
         parts.append('default')
 

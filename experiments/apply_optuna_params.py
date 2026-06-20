@@ -22,6 +22,14 @@ python experiments/apply_optuna_params.py \
     --targets "configs/i10p_rollout_*.json" "configs/i10p_seq_rollout_*.json" \
     --block rollout_policy
 
+# Per-asset works identically: the dir name '..._perasset' is mapped to
+# agent_type 'reactiveperasset' and the 30 flat per-asset keys
+# (repair/restrict/renovate_threshold_i) are injected verbatim into either block.
+python experiments/apply_optuna_params.py \
+    --params results/exp0/i10p_optuna_perasset/best_params.json \
+    --targets "configs/i10p_adp_*_policy_*.json" \
+    --block warmstart
+
 Add --dry-run to preview without writing. Targets that don't already contain the
 requested block are skipped (so the empty-init ADP cells are left untouched).
 """

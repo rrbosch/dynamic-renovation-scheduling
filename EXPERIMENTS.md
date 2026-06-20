@@ -128,17 +128,23 @@ sbatch --array=0-28  hpc/submit_array.sh   # ppo(0) + ADP(1-24) + rollout(25-28)
 (Registry order: ppo=0, ADP=1-24, MC rollout=25-28, optuna=29-31. PPO still won't write eval until
 the spawned ppo_trainer.evaluate fix lands.)
 
-### 0a. Optuna heuristics — 3/3 built · 1 run each · single-threaded
-**v2 (WilcoxonPruner + 100 tuning episodes) DONE.** v1 (30 ep, no pruner) archived under
-`results/_archive_0a_v1_30ep/`. v2 eliminated the winner's-curse bias (overfit ratio 1.77×→1.01×
-reactive, 1.73×→1.02× paced; perasset residual 1.21×). Pruning killed ~99.6% of trials.
-**Best heuristic = reactive** (held-out 830M, significantly < perasset, edges paced; ranking
-reactive < paced < perasset unchanged). v2's reactive now uses repair (thr 0.924).
-| Run | held-out cost (T+tail) | v2 Status |
-|---|---|---|
-| i10p_optuna_reactive ✅ best | **830M** ± 525M | ✅ done |
-| i10p_optuna_paced | 947M ± 769M | ✅ done |
-| i10p_optuna_perasset | 1125M ± 691M | ✅ done |
+### 0a. Optuna heuristics — DONE on the PREDICTABLE instance (re-run 2026-06-20)
+WilcoxonPruner + 100 tuning eps; ~15k–18k trials each, clean. **Ranking FLIPPED vs the noisy
+instance** — predictability rewards per-asset timing:
+| Run | held-out cost (T+tail) | CV | Status |
+|---|---|---|---|
+| i10p_optuna_perasset ✅ **best** | **795M** | **0.19** | ✅ done |
+| i10p_optuna_paced | 1244M | 0.76 | ✅ done |
+| i10p_optuna_reactive | 1535M | 0.58 | ✅ done |
+
+Per-asset = 795M was the best of the 3 originals (paired t=5.66 vs reactive, 3.27 vs paced).
+*(Noisy-instance 0A: reactive best 830M — archived under `results/exp0_noisy_alpha0p05/`.)*
+
+**EXPANDED 0A (in progress):** 5 new heuristics added (registry idx **32-36**) — `holding`,
+`leadtime`, `netconcurrency`, `valuedensity`, `worstfirst` (network-aware `netconcurrency`/`holding`
+may beat per-asset on travel-heavy i10p). Tune via `sbatch --array=32-36`, then pick the TRUE best of
+all 8 as the 0B warmstart/rollout base (injection is now heuristic-agnostic). **0B is HELD until then.**
+Per-asset is currently injected into 0B as a placeholder; will be re-injected with the winner.
 
 ### 0b-i. ADP grid — **24/24 built** · ⏳ re-run pending (predictable instance)
 All cells of `{normal,seq} × {empty,policy} × {fifo,lowesterror,knockout} × {xgb,nn}`. Run names:

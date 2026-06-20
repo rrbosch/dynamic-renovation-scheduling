@@ -293,12 +293,98 @@ def build_experiment(config: ExperimentConfig):
                 env_config=env.config,
             )
             def agent_factory(params, _cfg=env.config, _n=n):
-                thr = np.column_stack([
-                    [params[f'repair_threshold_{i}']   for i in range(_n)],
-                    [params[f'restrict_threshold_{i}'] for i in range(_n)],
-                    [params[f'renovate_threshold_{i}'] for i in range(_n)],
-                ])  # shape (N, 3)
+                thr = _perasset_thresholds_from_extra(params, _n)  # (N, 3)
                 return PerAssetReactiveAgent(thresholds=thr, env_config=_cfg)
+        elif heuristic_type == 'leadtime':
+            from agents.heuristics import LeadTimeAgent
+            _T = env.config.T
+            if not param_space:
+                param_space = {
+                    'lead_epochs':   {'type': 'float', 'low': 0.0, 'high': 0.25 * _T},
+                    'repair_lead':   {'type': 'float', 'low': 0.0, 'high': 0.25 * _T},
+                    'restrict_lead': {'type': 'float', 'low': 0.0, 'high': 0.25 * _T},
+                }
+            agent = LeadTimeAgent(lead_epochs=0.0, env_config=env.config)
+            def agent_factory(params, _cfg=env.config):
+                return LeadTimeAgent(
+                    lead_epochs=params['lead_epochs'],
+                    env_config=_cfg,
+                    repair_lead=params.get('repair_lead'),
+                    restrict_lead=params.get('restrict_lead'),
+                )
+        elif heuristic_type == 'netconcurrency':
+            from agents.heuristics import NetConcurrencyAgent
+            _flow = _asset_flow_proxy(env)
+            if not param_space:
+                param_space = {
+                    'threshold':      {'type': 'float', 'low': 0.3, 'high': 1.0},
+                    'max_concurrent': {'type': 'int',   'low': 1,   'high': env.config.n_assets},
+                    'spread_penalty': {'type': 'float', 'low': 0.0, 'high': 1.0},
+                }
+            agent = NetConcurrencyAgent(threshold=1.0, env_config=env.config, asset_flow=_flow)
+            def agent_factory(params, _cfg=env.config, _flow=_flow):
+                return NetConcurrencyAgent(
+                    threshold=params['threshold'],
+                    env_config=_cfg,
+                    max_concurrent=params.get('max_concurrent', 3),
+                    spread_penalty=params.get('spread_penalty', 0.0),
+                    asset_flow=_flow,
+                )
+        elif heuristic_type == 'holding':
+            from agents.heuristics import HoldingAgent
+            _flow = _asset_flow_proxy(env)
+            _T = env.config.T
+            if not param_space:
+                param_space = {
+                    'threshold':              {'type': 'float', 'low': 0.3, 'high': 1.0},
+                    'max_concurrent':         {'type': 'int',   'low': 1,   'high': env.config.n_assets},
+                    'defer_window':           {'type': 'float', 'low': 0.0, 'high': 0.25 * _T},
+                    'restrict_flow_quantile': {'type': 'float', 'low': 0.0, 'high': 1.0},
+                }
+            agent = HoldingAgent(threshold=1.0, env_config=env.config, asset_flow=_flow)
+            def agent_factory(params, _cfg=env.config, _flow=_flow):
+                return HoldingAgent(
+                    threshold=params['threshold'],
+                    env_config=_cfg,
+                    max_concurrent=params.get('max_concurrent', 3),
+                    defer_window=params.get('defer_window', 4.0),
+                    restrict_flow_quantile=params.get('restrict_flow_quantile', 0.5),
+                    asset_flow=_flow,
+                )
+        elif heuristic_type == 'valuedensity':
+            from agents.heuristics import ValueDensityAgent
+            if not param_space:
+                param_space = {
+                    'max_concurrent': {'type': 'int',   'low': 1,   'high': env.config.n_assets},
+                    'risk_weight':    {'type': 'float', 'low': 0.0, 'high': 2.0},
+                    'degrad_weight':  {'type': 'float', 'low': 0.0, 'high': 2.0},
+                    'threshold':      {'type': 'float', 'low': 0.0, 'high': 1.0},
+                }
+            agent = ValueDensityAgent(env_config=env.config)
+            def agent_factory(params, _cfg=env.config):
+                return ValueDensityAgent(
+                    env_config=_cfg,
+                    max_concurrent=params.get('max_concurrent', 3),
+                    risk_weight=params.get('risk_weight', 1.0),
+                    degrad_weight=params.get('degrad_weight', 1.0),
+                    threshold=params.get('threshold', 0.0),
+                )
+        elif heuristic_type == 'worstfirst':
+            from agents.heuristics import WorstFirstAgent
+            if not param_space:
+                param_space = {
+                    'max_concurrent': {'type': 'int',         'low': 1, 'high': env.config.n_assets},
+                    'threshold':      {'type': 'float',       'low': 0.3, 'high': 1.0},
+                    'use_length':     {'type': 'categorical', 'choices': [True, False]},
+                }
+            agent = WorstFirstAgent(env_config=env.config)
+            def agent_factory(params, _cfg=env.config):
+                return WorstFirstAgent(
+                    env_config=_cfg,
+                    max_concurrent=params.get('max_concurrent', 3),
+                    threshold=params.get('threshold', 0.5),
+                    use_length=params.get('use_length', True),
+                )
         else:
             raise ValueError(f"Unknown heuristic_type: {heuristic_type!r}")
 
@@ -393,6 +479,41 @@ _ROLLOUT_EXTRA_KEYS = {
 }
 _REACTIVE_EXTRA_KEYS = {'threshold', 'repair_threshold', 'restrict_threshold'}
 _PACED_EXTRA_KEYS = {'threshold', 'pace_threshold'}
+_LEADTIME_EXTRA_KEYS = {'lead_epochs', 'repair_lead', 'restrict_lead'}
+_NETCONCURRENCY_EXTRA_KEYS = {'threshold', 'max_concurrent', 'spread_penalty'}
+_HOLDING_EXTRA_KEYS = {'threshold', 'max_concurrent', 'defer_window',
+                       'restrict_flow_quantile'}
+_VALUEDENSITY_EXTRA_KEYS = {'max_concurrent', 'risk_weight', 'degrad_weight', 'threshold'}
+_WORSTFIRST_EXTRA_KEYS = {'max_concurrent', 'threshold', 'use_length'}
+
+
+def _asset_flow_proxy(env: InfraEnv) -> np.ndarray:
+    """Static per-asset nominal-capacity TAP flow, shape (N,).
+
+    Solved once (not per step) so network-aware heuristics (NetConcurrencyAgent,
+    HoldingAgent) can rank/spread renovations without calling TAP inside act().
+    """
+    flows = np.asarray(env.tap_fn.solve(env.network.nominal_capacities))
+    return flows[env.network.asset_indices]
+
+
+def _perasset_extra_keys(n: int) -> set:
+    """Allowed `extra` keys for a `reactiveperasset` heuristic: 3 thresholds per asset."""
+    return {f'{p}_{i}' for i in range(n)
+            for p in ('repair_threshold', 'restrict_threshold', 'renovate_threshold')}
+
+
+def _perasset_thresholds_from_extra(extra: dict, n: int) -> np.ndarray:
+    """Map flat per-asset threshold keys into the (N, 3) array PerAssetReactiveAgent expects.
+
+    Columns are [repair, restrict, renovate] (see PerAssetReactiveAgent docstring).
+    Used both by _build_agent (warmstart / rollout base policy) and the optuna agent_factory.
+    """
+    return np.column_stack([
+        [extra[f'repair_threshold_{i}']   for i in range(n)],
+        [extra[f'restrict_threshold_{i}'] for i in range(n)],
+        [extra[f'renovate_threshold_{i}'] for i in range(n)],
+    ])  # shape (N, 3)
 
 
 def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers: int = 1) -> Agent:
@@ -417,6 +538,67 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
         from agents.heuristics import PacedAgent
         return PacedAgent(threshold=extra.get('threshold', 0.7), pace_threshold=extra.get('pace_threshold'),
                           env_config=env.config)
+
+    if at == 'reactiveperasset':
+        from agents.heuristics import PerAssetReactiveAgent
+        n = env.config.n_assets
+        _check_extra_keys(at, extra, _perasset_extra_keys(n))
+        thr = _perasset_thresholds_from_extra(extra, n)
+        return PerAssetReactiveAgent(thresholds=thr, env_config=env.config)
+
+    if at == 'leadtime':
+        _check_extra_keys(at, extra, _LEADTIME_EXTRA_KEYS)
+        from agents.heuristics import LeadTimeAgent
+        return LeadTimeAgent(
+            lead_epochs=extra.get('lead_epochs', 4.0),
+            env_config=env.config,
+            repair_lead=extra.get('repair_lead', None),
+            restrict_lead=extra.get('restrict_lead', None),
+        )
+
+    if at == 'netconcurrency':
+        _check_extra_keys(at, extra, _NETCONCURRENCY_EXTRA_KEYS)
+        from agents.heuristics import NetConcurrencyAgent
+        return NetConcurrencyAgent(
+            threshold=extra.get('threshold', 0.7),
+            env_config=env.config,
+            max_concurrent=extra.get('max_concurrent', 3),
+            spread_penalty=extra.get('spread_penalty', 0.0),
+            asset_flow=_asset_flow_proxy(env),
+        )
+
+    if at == 'holding':
+        _check_extra_keys(at, extra, _HOLDING_EXTRA_KEYS)
+        from agents.heuristics import HoldingAgent
+        return HoldingAgent(
+            threshold=extra.get('threshold', 0.7),
+            env_config=env.config,
+            max_concurrent=extra.get('max_concurrent', 3),
+            defer_window=extra.get('defer_window', 4.0),
+            restrict_flow_quantile=extra.get('restrict_flow_quantile', 0.5),
+            asset_flow=_asset_flow_proxy(env),
+        )
+
+    if at == 'valuedensity':
+        _check_extra_keys(at, extra, _VALUEDENSITY_EXTRA_KEYS)
+        from agents.heuristics import ValueDensityAgent
+        return ValueDensityAgent(
+            env_config=env.config,
+            max_concurrent=extra.get('max_concurrent', 3),
+            risk_weight=extra.get('risk_weight', 1.0),
+            degrad_weight=extra.get('degrad_weight', 1.0),
+            threshold=extra.get('threshold', 0.0),
+        )
+
+    if at == 'worstfirst':
+        _check_extra_keys(at, extra, _WORSTFIRST_EXTRA_KEYS)
+        from agents.heuristics import WorstFirstAgent
+        return WorstFirstAgent(
+            env_config=env.config,
+            max_concurrent=extra.get('max_concurrent', 3),
+            threshold=extra.get('threshold', 0.5),
+            use_length=extra.get('use_length', True),
+        )
 
     if at in ('adp', 'dqn', 'actor_critic'):
         finite_horizon = extra.get('finite_horizon', True)
