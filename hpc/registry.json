@@ -158,5 +158,30 @@
     "config": "configs/i10p_optuna_reactive.json",
     "run_name": null,
     "seed": null
+  },
+  {
+    "config": "configs/i10p_optuna_holding.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_optuna_leadtime.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_optuna_netconcurrency.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_optuna_valuedensity.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_optuna_worstfirst.json",
+    "run_name": null,
+    "seed": null
   }
 ]
