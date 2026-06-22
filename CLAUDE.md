@@ -105,12 +105,21 @@ Risk per epoch increases linearly with duration of failure (`n_fail_i` counter).
   eval loops run the full `eval_length = T + tail_epochs` and **do not break on `env.step`'s
   `done`** (which fires at the planning horizon `t = T`); the env keeps stepping into the tail. This
   holds for `Trainer` (sequential + parallel worker), `OptunaHeuristicTrainer`, and `PPOTrainer`.
-  Note: `horizon_rollout` *training* still terminates its collection loop at `done` (= T); only
-  evaluation simulates the tail.
+  Note: `horizon_rollout` *training* now also simulates the tail — both training paths (sequential +
+  parallel worker) skip the `done`-break when `truncation_mode == 'horizon_rollout'`, collecting all
+  T + tail_epochs transitions (verified). `bootstrap`/`none` still stop at `done` (= T).
 
 ### Terminology
 
-- **Warmstart** = filling the replay buffer with heuristic-generated transitions before training begins
+- **Warmstart** = filling the replay buffer with heuristic-generated transitions before training begins.
+  Sized in **states/transitions** via `training.n_warmstart_states` (not episodes); the loop collects
+  whole episodes until that many transitions are buffered. Heuristic = `training.warmstart`
+  (`{agent_type, extra}`).
+- **init_action** (ADP only, `agent.extra.init_action`) = the seed of the local action search:
+  `'empty'` starts from do-nothing (all zeros); `'policy'` starts from the warmstart heuristic's action
+  at each decision (same heuristic as the buffer warmstart; wired in `build_experiment`). Independent of
+  whether/how the buffer is warmstarted. The action generators (`LocalSearchGenerator`,
+  `SequentialGenerator`) take an optional `init_action` arg (None ⇒ zeros).
 - **Truncation** = how the end of an episode is handled for training targets (none / horizon_rollout / bootstrap)
 
 ---
@@ -151,7 +160,8 @@ project/
 │   └── mdp.py              State, EnvConfig, InfraEnv
 ├── agents/
 │   ├── base.py             Agent ABC
-│   ├── heuristics.py       ReactiveAgent, PacedAgent
+│   ├── heuristics.py       ReactiveAgent, PacedAgent, PerAssetReactiveAgent, LeadTimeAgent,
+│   │                       NetConcurrencyAgent, HoldingAgent, ValueDensityAgent, WorstFirstAgent
 │   ├── dqn.py              DQNAgent
 │   ├── value_fn.py         ValueFn ABC, XGBoostValueFn, NeuralValueFn
 │   ├── action_gen.py       LocalSearchGenerator, SequentialGenerator, BDQGenerator (stub)
@@ -260,7 +270,12 @@ class State:
 ### `experiments/generate_instance.py`
 
 - `asset_lengths_m ~ LogNormal(mean=200m, CV=0.5)`
-- `alpha0 ~ LogNormal(mean=0.05, sigma_log=0.3)`
+- `alpha0 ~ LogNormal(mean=alpha0_mean, sigma_log=0.3)`, **default `alpha0_mean=0.8`** (CLI
+  `--alpha0-mean`). Higher `alpha0` ⇒ tighter Gamma increments per step ⇒ failure timing is more
+  *predictable* — **without changing E[lifetime]** (since `beta = alpha0·e_fail`, the mean per-epoch
+  increment `alpha0·dt/beta = dt/e_fail` is independent of `alpha0`). The old default 0.05 gave a
+  noise-dominated, near-unpredictable instance (TTF-CV ≈ 0.6); 0.8 gives TTF-CV ≈ 0.22. See
+  `docs/i10p_predictability_analysis.md`.
 - `e_fail ~ LogNormal(mean=60yr, CV=0.1)`, then `beta = alpha0 * e_fail`
 - `e_ren_weeks = 10 + L_i / 5` (base 10 weeks + 1 week per 5m length)
 - `mu_h = 1 / e_ren_years`, `sigma_h = 0.2 * mu_h`
@@ -284,7 +299,12 @@ converts it to epochs and adds it past the planning horizon `T = round(years / d
 ### `agents/value_fn.py — NeuralValueFn`
 
 Input dim = **5N** (not 4N). **Implemented** — torch MLP (`hidden_dims` default `(256, 256)`),
-selected via `value_fn: "neural"`. File lives at `agents/fn/value_fn.py`.
+selected via `value_fn: "neural"`. File lives at `agents/fn/value_fn.py`. **Normalizes inputs and
+targets** (z-scores features; standardizes the target, frozen on first `fit`, un-normalized on
+`predict`). This is essential: ADP value targets are euro cost-to-go ~1e11, and an un-normalized MLP
+collapses to a constant (→ do-nothing policy). XGBoost needs no such scaling (tree, scale-invariant).
+The same return/input normalization was applied to the PPO critic and the policy networks
+(`agents/ppo.py`, `agents/fn/policy.py`, `build_policy_input`).
 
 ---
 
@@ -295,15 +315,21 @@ selected via `value_fn: "neural"`. File lives at `agents/fn/value_fn.py`.
 - `env/degradation.py`: `gamma_step`, `wiener_step`
 - `env/tap.py`: `FastTAP` (numba FW), `NullTAP`, `make_tap`
 - `env/mdp.py`: Full MDP with 5-variable state, escalating risk cost, VOT travel cost
-- `agents/heuristics.py`: `ReactiveAgent`, `PacedAgent`
-- `agents/value_fn.py`: `XGBoostValueFn`, `NeuralValueFn`
-- `agents/action_gen.py`: `LocalSearchGenerator`, `SequentialGenerator`
+- `agents/heuristics.py`: `ReactiveAgent`, `PacedAgent`, `PerAssetReactiveAgent`, and (network-aware
+  / lifetime-aware baselines) `LeadTimeAgent`, `NetConcurrencyAgent`, `HoldingAgent`,
+  `ValueDensityAgent`, `WorstFirstAgent`. All tunable via `agent_type: optuna_heuristic`
+  (`heuristic_type`); any can be an ADP warmstart or MC-rollout base (see `_build_agent`).
+- `agents/value_fn.py`: `XGBoostValueFn`, `NeuralValueFn` (input/target normalized)
+- `agents/action_gen.py`: `LocalSearchGenerator` (steepest-descent, **batched** —
+  one `value_fn.predict` per sweep, not per candidate; ~5.5x faster for XGBoost),
+  `SequentialGenerator`
 - `agents/dqn.py`: `DQNAgent`
-- `agents/actor_critic.py`: `PolicyNetwork`, `ActorCriticAgent`
+- `agents/actor_critic.py`: `PolicyNetwork`, `ActorCriticAgent`; `agents/ppo.py`: PPO (normalized)
 - `agents/ranking.py`: `RankingValueFn`
-- `agents/rollout.py`: `MonteCarloRolloutAgent`
+- `agents/rollout.py`: `MonteCarloRolloutAgent` (fixed/adaptive Wilcoxon budgeting)
 - `training/buffer.py`: FIFO, lowest-error, stochastic knockout
-- `training/trainer.py`: Full training loop with bootstrap truncation
+- `training/trainer.py`: Full training loop; `none`/`bootstrap`/`horizon_rollout` truncation (tail
+  simulated in training for `horizon_rollout`); time-based periodic eval (`eval_interval_seconds`)
 - `experiments/configs.py`: Full wiring via `build_experiment`
 - `experiments/generate_instance.py`: Length-based parameter generation
 
