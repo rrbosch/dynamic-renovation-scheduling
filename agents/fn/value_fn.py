@@ -16,6 +16,66 @@ class ValueFn(ABC):
     prefers_full_dataset: bool = False  # if True, trainer passes full buffer instead of batch_size sample
     finite_horizon: bool = True   # set by subclass __init__
 
+    # --- Per-epoch baseline (advantage target) -------------------------------
+    # When enabled, the value function learns the *advantage* over a per-epoch
+    # baseline b(t) = mean cost-to-go at epoch t, instead of the raw cost-to-go.
+    # The dominant variance in the ADP target (mc_return - cost) is the time
+    # trend (early epochs have huge remaining cost-to-go, late epochs tiny);
+    # subtracting b(t) removes it so the residual the model fits is closer to the
+    # act-vs-wait signal the action search must resolve. This is purely a target
+    # reparameterisation: `fit_with_baseline` subtracts b(t) before fitting and
+    # `predict` adds it back, so `predict` always returns a full cost-to-go
+    # estimate. Q(s,a) = C(s,a) + V'(s_post) in the action generators stays a
+    # valid cost estimator unchanged, for BOTH XGBoost and the neural VF.
+    # b(t) is held here on the base class so every subclass inherits it.
+    _baseline: np.ndarray | None = None   # shape (max_t+1,) lookup table over epoch
+    _baseline_enabled: bool = False
+
+    def set_baseline_enabled(self, enabled: bool) -> None:
+        self._baseline_enabled = bool(enabled)
+
+    def _fit_baseline(self, t_idx: np.ndarray, y: np.ndarray) -> None:
+        """Estimate b(t) = mean(y | epoch=t) from the current training data.
+
+        Frozen on the FIRST call (like the NN standardization stats) so the
+        baseline space stays consistent across the many small fit() calls in the
+        training loop. Buckets with no samples fall back to the global mean."""
+        if self._baseline is not None:
+            return
+        t_idx = np.asarray(t_idx, dtype=np.int64)
+        t_idx = np.maximum(t_idx, 0)
+        max_t = int(t_idx.max())
+        gmean = float(y.mean())
+        b = np.full(max_t + 1, gmean, dtype=np.float64)
+        sums = np.bincount(t_idx, weights=y, minlength=max_t + 1)
+        cnts = np.bincount(t_idx, minlength=max_t + 1)
+        nz = cnts > 0
+        b[nz] = sums[nz] / cnts[nz]
+        self._baseline = b
+
+    def _baseline_for(self, states: list[State]) -> np.ndarray:
+        """Look up b(t) for each state's epoch, shape (len(states),)."""
+        if self._baseline is None:
+            return np.zeros(len(states))
+        t = np.fromiter((s.t for s in states), dtype=np.int64, count=len(states))
+        t = np.clip(t, 0, len(self._baseline) - 1)
+        return self._baseline[t]
+
+    def fit_targets(self, states: list[State], y: np.ndarray) -> None:
+        """Fit on (post-decision states, cost-to-go targets y).
+
+        Wraps the subclass `fit(X, y)`. When the per-epoch baseline is enabled,
+        b(t) is frozen on the first call and the model is fit on the advantage
+        y - b(t); `predict` adds b(t) back. When disabled, this is exactly the
+        old behaviour: fit on the raw cost-to-go target."""
+        X = self._feats(states)
+        if self._baseline_enabled:
+            t_idx = np.fromiter((s.t for s in states), dtype=np.int64,
+                                count=len(states))
+            self._fit_baseline(t_idx, y)
+            y = y - self._baseline_for(states)
+        self.fit(X, y)
+
     def _feats(self, states: list[State]) -> np.ndarray:
         """Extract feature matrix, optionally appending t."""
         X = np.concatenate([
@@ -80,6 +140,10 @@ class XGBoostValueFn(ValueFn):
             return np.zeros(len(states))
         X = self._feats(states)
         preds = self._model.predict(X)
+        if self._baseline_enabled:
+            # Model learned the advantage y - b(t); add b(t) back so predict
+            # returns a full cost-to-go estimate (Q reconstruction unchanged).
+            preds = preds + self._baseline_for(states)
         preds[preds < 0.01] = 0.01
         return preds
 
@@ -105,13 +169,17 @@ class XGBoostValueFn(ValueFn):
 
     def save(self, path: str) -> None:
         with open(path, 'wb') as f:
-            pickle.dump({'model': self._model, 'fitted': self._fitted}, f)
+            pickle.dump({'model': self._model, 'fitted': self._fitted,
+                         'baseline': self._baseline,
+                         'baseline_enabled': self._baseline_enabled}, f)
 
     def load(self, path: str) -> None:
         with open(path, 'rb') as f:
             data = pickle.load(f)
         self._model = data['model']
         self._fitted = data['fitted']
+        self._baseline = data.get('baseline')
+        self._baseline_enabled = data.get('baseline_enabled', False)
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +250,10 @@ class NeuralValueFn(ValueFn):
             preds = self._model(X_t).squeeze(-1).numpy()
         if self._stats_frozen:
             preds = preds * self._y_std + self._y_mean
+        if self._baseline_enabled:
+            # Model learned the advantage y - b(t); add b(t) back so predict
+            # returns a full cost-to-go estimate (Q reconstruction unchanged).
+            preds = preds + self._baseline_for(states)
         # Cost-to-go is non-negative; clamp like XGBoostValueFn to avoid the
         # action generator being misled by spurious negative values.
         preds = np.maximum(preds, 0.01)
@@ -231,6 +303,8 @@ class NeuralValueFn(ValueFn):
             'x_std': self._x_std,
             'y_mean': self._y_mean,
             'y_std': self._y_std,
+            'baseline': self._baseline,
+            'baseline_enabled': self._baseline_enabled,
         }, path)
 
     def load(self, path: str) -> None:
@@ -246,6 +320,8 @@ class NeuralValueFn(ValueFn):
         self._x_std = data.get('x_std')
         self._y_mean = data.get('y_mean')
         self._y_std = data.get('y_std')
+        self._baseline = data.get('baseline')
+        self._baseline_enabled = data.get('baseline_enabled', False)
         if data['state_dict'] is not None:
             self._build(data['input_dim'])
             self._model.load_state_dict(data['state_dict'])

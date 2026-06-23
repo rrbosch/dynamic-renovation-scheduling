@@ -82,11 +82,39 @@ label instead controls **`init_action`** (`agent.extra.init_action`): `empty` ru
 search from do-nothing; `policy` seeds it from the warmstart heuristic's action at each decision (same
 heuristic for both buffer warmstart and the search seed).
 
+**NN-ADP convergence fixes (2026-06-22).** Two cheap fixes target NN-ADP failing to rank act-vs-wait
+(it evaluated ~3.5e10, ~50× worse than its own ~785M warmstart heuristic, before any online drift —
+root causes: the warmstart buffer was ~98% do-nothing so V' never saw acting post-states, and the
+`mc_return - cost` target's dominant variance is the epoch trend, which swamps the act-vs-wait signal):
+- **(b) acting warmstart coverage** (`training.warmstart_explore_*`): the per-asset exploratory flip in
+  `_run_warmstart` now ramps with condition `d` and biases toward acting (esp. renovate) at high `d`.
+  Keys + defaults: `warmstart_explore_p_base` (1/120), `warmstart_explore_p_high` (0.50),
+  `warmstart_explore_d_ref` (0.5), `warmstart_explore_act_bias` (0.9), `warmstart_explore_renovate_bias`
+  (0.7). Setting `p_high == p_base` and `act_bias == 0` recovers the old uniform `1/T` flip.
+- **(c) per-epoch advantage baseline** (`agent.extra.advantage_baseline`, default off): the ADP value fn
+  subtracts a per-epoch baseline `b(t) = mean cost-to-go at epoch t` before fitting (learning the
+  advantage) and adds `b(t)` back on `predict`, so the action-gen `Q = C(s,a) + V'(s_post)` stays a
+  valid cost estimate for **both** XGBoost and the neural VF. `b(t)` is frozen on the first fit and
+  persisted in checkpoints. Pure reparameterisation — XGB results with the flag off are bit-identical.
+
 **(ii) MC rollout** — [i10p_rollout_*.json](configs/), with `empty` vs `policy` initial action, and
 a sequential variant (`seq_rollout`).
 
 **(iii) PPO with curriculum learning** — curriculum-based policy-gradient,
 [i10p_ppo_curriculum.json](configs/i10p_ppo_curriculum.json).
+
+**(iv) DCL (Deep Controlled Learning)** — faithful approximate-policy-iteration
+reproduction (Temizöz et al., EJOR 2025), rebuilt from scratch (old hybrid kept at
+`agents/dcl_old.py`; see [docs/dcl_faithful_vs_hybrid.md](docs/dcl_faithful_vs_hybrid.md)).
+Classifier deployed at eval (cheap argmax); a rollout oracle labels on-policy
+states each round. Three `action_search` decompositions × `{xgboost,nn}` classifier
+× `rollout_selection ∈ {fixed, wilcoxon, sequential_halving}`, with an optional
+truncated-rollout VFA (`rollout_horizon`). Configs:
+[i10p_dcl_seq_xgb.json](configs/i10p_dcl_seq_xgb.json) (primary),
+[i10p_dcl_seq_nn.json](configs/i10p_dcl_seq_nn.json),
+[i10p_dcl_independent_xgb.json](configs/i10p_dcl_independent_xgb.json),
+[i10p_dcl_localsearch_nn.json](configs/i10p_dcl_localsearch_nn.json),
+[i10p_dcl_seq_xgb_vfa_sh.json](configs/i10p_dcl_seq_xgb_vfa_sh.json) (VFA + SH).
 
 ---
 
@@ -226,6 +254,65 @@ per-asset **795M**.
 | Run | In registry | Status |
 |---|---|---|
 | i10p_ppo_curriculum | ✅ | 🟢 submitted |
+
+### 0b-iv. DCL — rebuilt from scratch (faithful) · ✅ verified locally · ⏳ run on Snellius
+Faithful reproduction (`agents/dcl.py`, `training/dcl_trainer.py`); old hybrid
+preserved at `agents/dcl_old.py` (see [docs/dcl_faithful_vs_hybrid.md](docs/dcl_faithful_vs_hybrid.md)).
+**Verified** (`tests/test_dcl.py`, 23 pass + 13 rollout regression pass + CLI
+`run.py` end-to-end): SH correctness, CRN determinism, oracle feasibility/
+determinism for all 3×3 (decomposition × selection), one-round training for all 3
+decompositions × {xgboost, nn}, VFA opt-in build+fit, checkpoint resume.
+
+> **⚠️ Must be tested on Snellius.** Local verification used `tap_backend:"null"`
+> (NullTAP, no numba) and tiny budgets — it proves correctness, **not** policy
+> quality. Real screening needs FastTAP (`tap_backend:"fast"`, the committed
+> default), the real travel-cost signal, a proper training budget, and the
+> cross-check vs MC rollout. Two caveats for sizing the jobs:
+> - **DCL collection is currently single-core** (`DCLTrainer` does not yet
+>   parallelize state collection across `n_workers`; eval is also serial). Each
+>   run is serial → parallelise across the grid via the SLURM **job array**, not
+>   within a run. (Parallel collection is a worthwhile follow-up given the heavy
+>   per-step TAP solve — that is what the `rollout_horizon`+VFA shortcut targets.)
+> - **Use the tuned per-asset heuristic as the base policy** (`heuristic_policy`),
+>   not plain reactive(0.8): inject the 0a `reactiveperasset` best-params via
+>   `apply_optuna_params.py` (same heuristic the rollout/ADP consumers use) so
+>   round-0 labels start from a strong policy.
+
+**Proposed Phase-1 grid on `instance_10p`** (base = `sequential` + `xgboost` +
+`fixed` + no-VFA; one-factor-at-a-time around it). Shared held-constant settings:
+`n_rounds=5`, `samples_per_round≈3000`, `warmup_steps=100`, fixed/SH budget
+`n_rollouts=20`, `action_threshold=0.5`, tuned `reactiveperasset` base,
+`n_eval_episodes=50`, `tap_backend:"fast"`. Screen at `seed=42`; re-run winners at
+5 seeds (Exp-1 convention).
+
+*A. Architecture sweep* — which decomposition × classifier (6 cells, faithful default `fixed`/no-VFA):
+
+| action_search | xgboost | nn |
+|---|---|---|
+| sequential   | `i10p_dcl_seq_xgb` ✅ | `i10p_dcl_seq_nn` ✅ |
+| independent  | `i10p_dcl_independent_xgb` ✅ | `i10p_dcl_independent_nn` ⬜ |
+| local_search | `i10p_dcl_localsearch_xgb` ⬜ | `i10p_dcl_localsearch_nn` ✅ |
+
+*B. Rollout-elimination sweep* — does SH/Wilcoxon cut sims vs `fixed` at equal label quality? (hold `sequential`+`xgboost`+no-VFA):
+
+| selection | config |
+|---|---|
+| fixed (base) | `i10p_dcl_seq_xgb` ✅ |
+| wilcoxon | `i10p_dcl_seq_xgb_wilcoxon` ⬜ |
+| sequential_halving | `i10p_dcl_seq_xgb_sh` ⬜ |
+
+*C. VFA-shortcut sweep* — does truncated-rollout + VFA preserve quality while cutting the TAP cost? (hold `sequential`+`xgboost`):
+
+| rollout_horizon / selection | config |
+|---|---|
+| null / fixed (base, value-fn-free) | `i10p_dcl_seq_xgb` ✅ |
+| 20 / fixed | `i10p_dcl_seq_xgb_vfa` ⬜ |
+| 20 / sequential_halving | `i10p_dcl_seq_xgb_vfa_sh` ✅ |
+
+✅ = config exists; ⬜ = one-line edit of the shared template (≈10 configs total).
+Compare all on the shared-CRN eval against `i10p_rollout_policy` (anytime upper
+bound) and the 0a heuristics; DCL's edge is **cheap deployment** (classifier
+argmax) vs rollout's per-step search.
 
 ---
 

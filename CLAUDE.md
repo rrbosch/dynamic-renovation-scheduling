@@ -114,7 +114,19 @@ Risk per epoch increases linearly with duration of failure (`n_fail_i` counter).
 - **Warmstart** = filling the replay buffer with heuristic-generated transitions before training begins.
   Sized in **states/transitions** via `training.n_warmstart_states` (not episodes); the loop collects
   whole episodes until that many transitions are buffered. Heuristic = `training.warmstart`
-  (`{agent_type, extra}`).
+  (`{agent_type, extra}`). **Warmstart exploration (fix (b)):** the per-asset exploratory flip in
+  `_run_warmstart` ramps its probability with condition `d` and biases toward *acting* (esp. renovate)
+  at high `d`, so V' gets coverage of acting post-states (the heuristic alone is ~98% do-nothing).
+  Controlled by `training.warmstart_explore_{p_base,p_high,d_ref,act_bias,renovate_bias}`; set
+  `p_high == p_base` and `act_bias == 0` to recover the old uniform `1/T` flip. Reproducible (keyed on
+  `self.seed`).
+- **Advantage baseline** (fix (c), `agent.extra.advantage_baseline`, ADP only, default off) = the value
+  fn subtracts a per-epoch baseline `b(t) = mean(mc_return - cost | epoch t)` before fitting (so V'
+  learns an *advantage*, removing the dominant epoch-trend variance that swamps the act-vs-wait signal)
+  and adds `b(t)` back on `predict`. Encapsulated in `ValueFn` (base class holds `b(t)`; `ADPAgent.update`
+  calls `value_fn.fit_targets(post_states, y)`), so `Q(s,a) = C(s,a) + V'(s_post)` stays a valid cost
+  estimate for **both** XGBoost and the neural VF. `b(t)` is frozen on the first fit and checkpointed.
+  With the flag off, `fit_targets` is bit-identical to the old `fit(X, y)`.
 - **init_action** (ADP only, `agent.extra.init_action`) = the seed of the local action search:
   `'empty'` starts from do-nothing (all zeros); `'policy'` starts from the warmstart heuristic's action
   at each decision (same heuristic as the buffer warmstart; wired in `build_experiment`). Independent of

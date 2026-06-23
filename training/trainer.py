@@ -142,8 +142,19 @@ class TrainingConfig:
     buffer_strategy: str = 'fifo'
     n_eval_episodes: int = 10
     batch_size: int = 2048
-    n_warmstart_episodes: int = 0           # 0 = disabled
+    n_warmstart_states: int = 0             # 0 = disabled; fill buffer with this many
+                                            # heuristic transitions (states) before training
     warmstart_agent_config: dict | None = None  # parsed from JSON 'warmstart' key
+    # (b) Warmstart exploration. The warmstart heuristic is ~98% do-nothing, so
+    # V' never sees the *acting* post-states the greedy search must rank. These
+    # keys add d-dependent exploratory flips that bias toward acting (esp.
+    # renovate) when condition is high, giving V' coverage of act-at-high-d
+    # post-states without destroying the on-policy trajectory signal.
+    warmstart_explore_p_base: float = 1.0 / 120  # per-asset flip prob at d=0 (= old 1/T default)
+    warmstart_explore_p_high: float = 0.50       # per-asset flip prob as d -> d_fail
+    warmstart_explore_d_ref: float = 0.5         # d above which flips ramp toward p_high
+    warmstart_explore_act_bias: float = 0.9      # P(flip is an *acting* action vs uniform-feasible)
+    warmstart_explore_renovate_bias: float = 0.7  # within acting flips, P(renovate) (rest split repair/restrict)
     checkpoint_interval: int = 0                 # 0 = disabled; save checkpoint every N episodes (legacy)
     checkpoint_interval_seconds: float = 1800.0  # 0 = disabled; save checkpoint every N wall-clock seconds
     config_hash: str = ''                        # stable hash of ExperimentConfig (excl. seed)
@@ -350,23 +361,54 @@ class Trainer:
 
     def _run_warmstart(self, warmstart_agent: 'Agent') -> None:
         env, cfg = self.env, self.config
+        target = cfg.n_warmstart_states
         print(f"Warmstarting buffer with {type(warmstart_agent).__name__} "
-              f"for {cfg.n_warmstart_episodes} episodes...")
+              f"for {target} states...")
         rng = np.random.default_rng(self.seed)
         n = env.config.n_assets
-        p_flip = 1 / env.config.T
+        # (b) d-dependent exploratory flips, biased toward acting (esp. renovate)
+        # at high d. p_flip ramps linearly from p_base (d<=d_ref) to p_high (d=d_fail).
+        d_fail = float(env.config.d_fail)
+        p_base = cfg.warmstart_explore_p_base
+        p_high = cfg.warmstart_explore_p_high
+        d_ref = cfg.warmstart_explore_d_ref
+        act_bias = cfg.warmstart_explore_act_bias
+        ren_bias = cfg.warmstart_explore_renovate_bias
+        _denom = max(1e-9, d_fail - d_ref)
+        ACT_NONE, ACT_REPAIR, ACT_RENOVATE, ACT_RESTRICT = 0, 1, 2, 3
         _ws_t0 = time.monotonic()
-        _ws_report_every = max(1, cfg.n_warmstart_episodes // 20)  # ~20 progress lines
-        for _ws_ep in range(cfg.n_warmstart_episodes):
+        _ws_report_every = max(1, target // 20)  # ~20 progress lines
+        _next_report = _ws_report_every
+        n_states = 0          # transitions generated (may exceed buffer len under eviction)
+        _ws_ep = 0
+        # Collect whole episodes until the requested number of states is reached.
+        while n_states < target:
             env.begin_episode("warmstart", _ws_ep)
             state = env.reset()
             ep_transitions: list[Transition] = []
             for _ in range(env.config.T):
                 action = warmstart_agent.act(state)
                 feas = env.feasible_actions(state)        # (N, 4) bool
+                # Per-asset flip prob ramps with condition d (more exploration
+                # near failure, where the act-vs-wait decision actually matters).
+                ramp = np.clip((state.d - d_ref) / _denom, 0.0, 1.0)
+                p_flip_i = p_base + (p_high - p_base) * ramp
                 for i in range(n):
-                    if rng.random() < p_flip:
-                        feasible_i = np.where(feas[i])[0]
+                    if rng.random() >= p_flip_i[i]:
+                        continue
+                    feasible_i = np.where(feas[i])[0]
+                    # Prefer an *acting* feasible action (esp. renovate) with prob
+                    # act_bias; otherwise uniform over all feasible actions.
+                    acting = feasible_i[feasible_i != ACT_NONE]
+                    if acting.size > 0 and rng.random() < act_bias:
+                        if ACT_RENOVATE in acting and rng.random() < ren_bias:
+                            action[i] = ACT_RENOVATE
+                        else:
+                            # remaining acting actions (repair/restrict), or
+                            # renovate if it was the only acting option
+                            rest = acting[acting != ACT_RENOVATE]
+                            action[i] = int(rng.choice(rest if rest.size > 0 else acting))
+                    else:
                         action[i] = int(rng.choice(feasible_i))
                 next_state, cost, done = env.step(state, action)
                 post_state = env.post_decision_state(state, action)
@@ -376,21 +418,25 @@ class Trainer:
                 )
                 ep_transitions.append(tr)
                 self.buffer.add(tr)
+                n_states += 1
                 state = next_state
-                if done:
+                if done or n_states >= target:
                     break
             # Backward MC pass — VF is untrained here so always start G=0
             G = 0.0
             for tr in reversed(ep_transitions):
                 G = tr.cost + env.config.gamma * G
                 tr.mc_return = G
+            _ws_ep += 1
 
             # Periodic progress so a slow eviction strategy is visible in the log
-            if (_ws_ep + 1) % _ws_report_every == 0:
-                rate = (_ws_ep + 1) / max(1e-9, time.monotonic() - _ws_t0)
-                print(f"Warmstart progress: {_ws_ep + 1}/{cfg.n_warmstart_episodes} episodes, "
-                      f"buffer={len(self.buffer)}, {rate:.2f} ep/s")
-        print(f"Warmstart complete. Buffer size: {len(self.buffer)}")
+            if n_states >= _next_report:
+                rate = n_states / max(1e-9, time.monotonic() - _ws_t0)
+                print(f"Warmstart progress: {n_states}/{target} states "
+                      f"({_ws_ep} episodes), buffer={len(self.buffer)}, {rate:.0f} states/s")
+                _next_report += _ws_report_every
+        print(f"Warmstart complete. {n_states} states from {_ws_ep} episodes. "
+              f"Buffer size: {len(self.buffer)}")
 
         # Pre-train VFA on the collected heuristic data
         if self._is_learner and len(self.buffer) > 0:
@@ -414,11 +460,11 @@ class Trainer:
         env = self.env
         agent = self.agent
 
-        if start_ep == 0 and cfg.n_warmstart_episodes > 0:
+        if start_ep == 0 and cfg.n_warmstart_states > 0:
             if cfg.warmstart_agent_config is not None:
                 self._run_warmstart(self._resolve_warmstart_agent(cfg.warmstart_agent_config))
             else:
-                warnings.warn("n_warmstart_episodes > 0 but no 'warmstart' config provided. Skipping.")
+                warnings.warn("n_warmstart_states > 0 but no 'warmstart' config provided. Skipping.")
 
         t_start = time.monotonic()
         self._last_checkpoint_wall = already_elapsed  # reset clock relative to resume point

@@ -14,7 +14,7 @@
     "buffer_strategy": "fifo",
     "n_eval_episodes": 10,
     "n_workers": 16,
-    "n_warmstart_episodes": 1667,
+    "n_warmstart_states": 200000,
     "warmstart": {
       "agent_type": "reactiveperasset",
       "extra": {
@@ -54,6 +54,9 @@
   "agent": {
     "agent_type": "adp",
     "value_fn": "xgboost",
-    "action_gen": "sequential"
+    "action_gen": "sequential",
+    "extra": {
+      "init_action": "policy"
+    }
   }
 }
