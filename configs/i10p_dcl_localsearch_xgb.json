@@ -2,7 +2,7 @@
   "network": "sioux_falls",
   "tap_backend": "fast",
   "seed": 42,
-  "run_name": "exp0/i10p_dcl_seq_xgb",
+  "run_name": "exp0/i10p_dcl_localsearch_xgb",
   "instance": "instances/instance_10p.json",
   "training": {
     "eval_interval": 1,
@@ -14,7 +14,7 @@
     "agent_type": "dcl",
     "extra": {
       "class_weight": "balanced_sqrt",
-      "action_search": "sequential",
+      "action_search": "local_search",
       "policy_type": "xgboost",
       "n_rounds": 100,
       "samples_per_round": 5000,

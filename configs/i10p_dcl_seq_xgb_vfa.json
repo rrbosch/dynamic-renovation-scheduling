@@ -2,7 +2,7 @@
   "network": "sioux_falls",
   "tap_backend": "fast",
   "seed": 42,
-  "run_name": "exp0/i10p_dcl_seq_xgb",
+  "run_name": "exp0/i10p_dcl_seq_xgb_vfa",
   "instance": "instances/instance_10p.json",
   "training": {
     "eval_interval": 1,
@@ -19,7 +19,8 @@
       "n_rounds": 100,
       "samples_per_round": 5000,
       "collect_steps": 0,
-      "rollout_horizon": null,
+      "rollout_horizon": 20,
+      "value_fn": "xgboost",
       "n_rollouts": 40,
       "rollout_selection": "fixed",
       "action_threshold": 0.5,

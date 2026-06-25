@@ -183,5 +183,55 @@
     "config": "configs/i10p_optuna_worstfirst.json",
     "run_name": null,
     "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_independent_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_independent_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_localsearch_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_localsearch_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_xgb_wilcoxon.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_xgb_sh.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_xgb_vfa.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_xgb_vfa_sh.json",
+    "run_name": null,
+    "seed": null
   }
 ]

@@ -56,7 +56,8 @@
     "value_fn": "xgboost",
     "action_gen": "sequential",
     "extra": {
-      "init_action": "empty"
+      "init_action": "empty",
+      "advantage_baseline": true
     }
   }
 }

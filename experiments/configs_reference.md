@@ -161,8 +161,7 @@ Unknown `extra` keys are rejected by `_check_extra_keys`.
 | `heuristic_policy` | reactive (thr 0.8) | Round-0 base policy (nested agent dict) |
 | `n_rounds` | `3` | Approximate-policy-iteration rounds |
 | `samples_per_round` | `2000` | Labelled (state, action) pairs collected per round |
-| `warmup_steps` | `100` | On-policy warm-up steps before labelling (L) |
-| `collect_steps` | `0` | Per-episode labelled-state cap; `0` = to episode end |
+| `collect_steps` | `0` | Per-episode labelled-state cap; `0` = to episode end (labels from t=0) |
 | `rollout_horizon` | `null` | `null` ⇒ full rollout, **value-function-free** (faithful). An int K ⇒ truncate at K and bootstrap the tail with a VFA (compute shortcut) |
 | `value_fn` | `"xgboost"` | VFA for the tail bootstrap — only built/used when `rollout_horizon` is set (`"xgboost"` or `"neural"`) |
 | `n_rollouts` | `30` | Rollouts per Q estimate (fixed budget; M for SH) |

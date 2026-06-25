@@ -470,7 +470,6 @@ def build_experiment(config: ExperimentConfig):
         dcl_config = DCLConfig(
             n_rounds=int(dx.get('n_rounds', 3)),
             samples_per_round=int(dx.get('samples_per_round', 2000)),
-            warmup_steps=int(dx.get('warmup_steps', 100)),
             collect_steps=int(dx.get('collect_steps', 0)),
             rollout_horizon=dx.get('rollout_horizon', None),
             n_rollouts=int(dx.get('n_rollouts', 30)),
@@ -490,6 +489,8 @@ def build_experiment(config: ExperimentConfig):
             T_tail=_T_tail,
             seed=config.seed,
             config_hash=_config_hash,
+            n_workers=int(tc_dict.get('n_workers', 1)),
+            tap_backend=config.tap_backend,
         )
         trainer = DCLTrainer(agent, env, dcl_config, logger)
     else:
@@ -537,9 +538,9 @@ _DCL_EXTRA_KEYS = {
     # decomposition + classifier
     'action_search', 'policy_type', 'value_fn', 'finite_horizon',
     'use_global_context', 'hidden_dims', 'policy_lr', 'policy_epochs',
-    'policy_batch_size', 'clf_kwargs', 'heuristic_policy',
+    'policy_batch_size', 'clf_kwargs', 'class_weight', 'heuristic_policy',
     # approximate-policy-iteration loop
-    'n_rounds', 'samples_per_round', 'warmup_steps', 'collect_steps',
+    'n_rounds', 'samples_per_round', 'collect_steps',
     # rollout-improvement oracle
     'rollout_horizon', 'n_rollouts', 'rollout_selection', 'sh_budget_per_arm',
     'p_threshold', 'min_rollouts', 'max_rollouts', 'rollout_batch',
@@ -773,6 +774,7 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
             epochs=extra.get('policy_epochs', 30),
             batch_size=extra.get('policy_batch_size', 256),
             clf_kwargs=extra.get('clf_kwargs', None),
+            class_weight=extra.get('class_weight', None),
             finite_horizon=extra.get('finite_horizon', True),
         )
         heuristic_cfg = extra.get('heuristic_policy',

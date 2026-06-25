@@ -91,6 +91,14 @@ def _patch_config(cfg: dict, block: str, heuristic: str, params: dict) -> bool:
             return False
         extra["rollout_policy"] = {"agent_type": heuristic, **params}
         return True
+    if block == "heuristic_policy":
+        # DCL base policy (agent.extra.heuristic_policy): nested {agent_type, extra}
+        # schema, same shape as warmstart but under the agent block.
+        extra = cfg.get("agent", {}).get("extra", {})
+        if "heuristic_policy" not in extra:
+            return False
+        extra["heuristic_policy"] = {"agent_type": heuristic, "extra": dict(params)}
+        return True
     raise ValueError(f"Unknown block: {block!r}")
 
 
@@ -102,7 +110,8 @@ def main() -> None:
     parser.add_argument("--targets", nargs="+", required=True,
                         help="Target config files or globs to patch")
     parser.add_argument("--block", required=True,
-                        choices=["warmstart", "curriculum_heuristic", "rollout_policy"],
+                        choices=["warmstart", "curriculum_heuristic", "rollout_policy",
+                                 "heuristic_policy"],
                         help="Which consumer block to overwrite")
     parser.add_argument("--heuristic", default=None,
                         help="Heuristic agent_type (default: inferred from --params dir name)")

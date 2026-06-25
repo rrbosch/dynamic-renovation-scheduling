@@ -12,6 +12,7 @@ when `rollout_horizon` is set) is owned here and passed to the oracle.
 """
 from __future__ import annotations
 
+import math
 import os
 import json
 import shutil
@@ -36,12 +37,86 @@ except ImportError:                       # progress bar is cosmetic; degrade gr
 from env.mdp import InfraEnv
 
 
+# ---------------------------------------------------------------------------
+# Module-level collection helpers (top-level so they pickle for `spawn` workers)
+# ---------------------------------------------------------------------------
+
+def _init_worker():
+    """Pin BLAS/OpenMP/torch to a single thread inside each collection worker, so
+    the parallelism stays at the PROCESS layer (one layer at a time, CLAUDE.md §8
+    rule 4). Without this, 16 worker processes each running multi-threaded xgboost
+    `predict` (the round>=1 base policy) would oversubscribe the 16 cores."""
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[var] = "1"
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+
+def _collect_one_episode(agent, env, oracle, value_fn, round_idx, global_ep,
+                         n_collect, eval_length, gamma, base_seed):
+    """Collect one on-policy episode: label `n_collect` states (starting at t=0)
+    with the rollout oracle and step forward under the label. Returns
+    (states, labels, vf_states, vf_targets). Keyed on (base_seed, GLOBAL episode
+    index) so the result is independent of worker assignment AND of how each
+    worker's env was constructed.
+
+    No burn-in: this is a finite-horizon MDP, so labelling starts at t=0 to cover
+    the full horizon the deployed classifier sees (see
+    docs/dcl_faithful_vs_hybrid.md)."""
+    env.begin_episode("dcl_collect", round_idx * 1_000_000 + global_ep, base_seed)
+    s = env.reset()
+    t = 0
+
+    states, labels, ep_states, ep_costs = [], [], [], []
+    for _ in range(n_collect):
+        if t >= eval_length:
+            break
+        label = oracle.act(s)
+        states.append(s.copy())
+        labels.append(label.copy())
+        ep_states.append(s.copy())
+        s, cost, _ = env.step(s, label)
+        ep_costs.append(cost)
+        t += 1
+
+    vf_states, vf_targets = [], []
+    if value_fn is not None and ep_states:
+        # n-step return-to-go under the improved policy; bootstrap with the VFA
+        # when we stopped before the horizon end, else 0 at the end.
+        G = 0.0 if t >= eval_length else float(value_fn.predict([s])[0])
+        for st, c in zip(reversed(ep_states), reversed(ep_costs)):
+            G = c + gamma * G
+            vf_states.append(st)
+            vf_targets.append(G)
+    return states, labels, vf_states, vf_targets
+
+
+def _run_dcl_collect_episode(args):
+    """Worker entry: reconstruct env + oracle from the pickled agent, then collect
+    one episode. Module-level for `spawn` pickling (mirrors `_run_train_episode`)."""
+    (agent, env_config, network, tap_backend, base_seed, round_idx, global_ep,
+     dcl_cfg, value_fn, n_collect, eval_length, gamma) = args
+    from env.tap import make_tap
+    env = InfraEnv(network, make_tap(network, backend=tap_backend), env_config,
+                   rng_seed=base_seed)
+    # Point the policy at this worker's fresh env so the oracle's rollouts and the
+    # warm-up share one (config-identical) env instance.
+    agent.policy.env = env
+    agent.policy.cfg = env.config
+    agent.policy.set_predict_threads(1)        # avoid xgboost thread oversubscription
+    oracle = agent.policy.make_oracle(agent, dcl_cfg, base_seed + round_idx, value_fn)
+    return _collect_one_episode(agent, env, oracle, value_fn, round_idx, global_ep,
+                                n_collect, eval_length, gamma, base_seed)
+
+
 @dataclass
 class DCLConfig:
     # Approximate-policy-iteration loop
     n_rounds: int = 3
     samples_per_round: int = 2000          # labelled (state, action) pairs per round
-    warmup_steps: int = 100                # L: on-policy warm-up before labelling
     collect_steps: int = 0                 # per-episode labelled cap; 0 = to episode end
     # Rollout-improvement oracle
     rollout_horizon: int | None = None     # None = full rollout (value-function-free)
@@ -64,6 +139,8 @@ class DCLConfig:
     T_tail: float = 10.0
     seed: int = 0
     config_hash: str = ''
+    n_workers: int = 1                     # process pool for collection + eval
+    tap_backend: str = 'fast'              # for env reconstruction in workers
 
 
 class DCLTrainer:
@@ -75,6 +152,9 @@ class DCLTrainer:
         self.seed = config.seed
         self.value_fn = self._build_value_fn() if config.rollout_horizon is not None else None
         self._last_checkpoint_dir: str | None = None
+        # TAP backend for env reconstruction in spawn workers. Prefer the config
+        # value; fall back to the tag build_experiment stamps on the env.
+        self._tap_backend = config.tap_backend or getattr(env, '_tap_backend_name', 'fast')
 
     def _build_value_fn(self):
         if self.config.value_fn_kind == 'neural':
@@ -135,68 +215,51 @@ class DCLTrainer:
     # Dataset collection
     # ------------------------------------------------------------------
     def _collect_dataset(self, oracle, round_idx: int):
-        """Warm-up under the current policy, then label states with the oracle and
-        step forward under the label. Returns (states, labels, vf_states,
-        vf_targets); the vf_* lists are empty when no VFA is used."""
+        """Collect this round's on-policy dataset over a FIXED number of episodes
+        (so the result is a pure function of (seed, round) — identical for any
+        `n_workers`, including the serial path). Returns (states, labels,
+        vf_states, vf_targets); the vf_* lists are empty when no VFA is used.
+
+        Each episode warms up under the current policy then labels `n_collect`
+        states with the oracle. Episodes are independent → embarrassingly parallel
+        across `n_workers` (DCL's "W threads")."""
         cfg = self.config
         gamma = self.env.config.gamma
         eval_length = self.env.config.T + int(cfg.T_tail / self.env.config.dt)
         cap = cfg.collect_steps if cfg.collect_steps > 0 else eval_length
-        # Always leave room for >= 1 labelled step after warm-up, else an episode
-        # contributes nothing and the collection loop would spin forever.
-        warmup = max(0, min(cfg.warmup_steps, eval_length - 1))
-        max_episodes = 100 + 10 * cfg.samples_per_round   # safety against no progress
+        # No burn-in (finite horizon): every episode labels from t=0. Per-episode yield is fixed.
+        n_collect = max(1, min(cap, eval_length))
+        n_episodes = max(1, math.ceil(cfg.samples_per_round / n_collect))
 
-        states, labels = [], []
-        vf_states, vf_targets = [], []
-        ep_idx = 0
-        with tqdm(total=cfg.samples_per_round,
-                  desc=f"DCL round {round_idx} collect", unit="state") as pbar:
-            while len(states) < cfg.samples_per_round and ep_idx < max_episodes:
-                # A dedicated phase tag keeps this stream independent from the
-                # real "training"/"evaluation" streams (no clairvoyance).
-                self.env.begin_episode("dcl_collect", round_idx * 1_000_000 + ep_idx)
-                s = self.env.reset()
-                ep_idx += 1
+        if cfg.n_workers > 1:
+            from multiprocessing import get_context
+            args_list = [
+                (self.agent, self.env.config, self.env.network, self._tap_backend,
+                 self.seed, round_idx, e, cfg, self.value_fn,
+                 n_collect, eval_length, gamma)
+                for e in range(n_episodes)
+            ]
+            ctx = get_context('spawn')
+            with ctx.Pool(processes=cfg.n_workers, initializer=_init_worker) as pool:
+                # imap (not imap_unordered) preserves order → deterministic concat.
+                results = list(tqdm(pool.imap(_run_dcl_collect_episode, args_list),
+                                    total=n_episodes,
+                                    desc=f"DCL round {round_idx} collect", unit="ep"))
+        else:
+            results = [
+                _collect_one_episode(self.agent, self.env, oracle, self.value_fn,
+                                     round_idx, e, n_collect, eval_length,
+                                     gamma, self.seed)
+                for e in tqdm(range(n_episodes),
+                              desc=f"DCL round {round_idx} collect", unit="ep")
+            ]
 
-                # Warm-up L steps under the base policy (no labelling).
-                t = 0
-                for _ in range(warmup):
-                    a = self.agent.act(s)
-                    s, _, _ = self.env.step(s, a)
-                    t += 1
-
-                # Label and step forward under the improved action.
-                ep_states, ep_costs = [], []
-                steps = 0
-                stopped_at_done = False
-                while steps < cap and t < eval_length and len(states) < cfg.samples_per_round:
-                    label = oracle.act(s)
-                    states.append(s.copy())
-                    labels.append(label.copy())
-                    ep_states.append(s.copy())
-                    s_next, cost, done = self.env.step(s, label)
-                    ep_costs.append(cost)
-                    s = s_next
-                    t += 1
-                    steps += 1
-                    pbar.update(1)
-                    if t >= eval_length:
-                        stopped_at_done = True
-                        break
-
-                # Value targets: n-step return-to-go under the improved policy.
-                # Bootstrap with the (previous round's) VFA when we stopped before
-                # the horizon end; 0 at the horizon end.
-                if self.value_fn is not None and ep_states:
-                    if stopped_at_done:
-                        G = 0.0
-                    else:
-                        G = float(self.value_fn.predict([s])[0])
-                    for st, c in zip(reversed(ep_states), reversed(ep_costs)):
-                        G = c + gamma * G
-                        vf_states.append(st)
-                        vf_targets.append(G)
+        states, labels, vf_states, vf_targets = [], [], [], []
+        for st, lb, vs, vt in results:
+            states += st
+            labels += lb
+            vf_states += vs
+            vf_targets += vt
         return states, labels, vf_states, vf_targets
 
     # ------------------------------------------------------------------
@@ -229,28 +292,50 @@ class DCLTrainer:
             self.logger.start_eval(append=(completed > 0))
 
         episode_costs, episodes = [], []
-        for i in tqdm(range(remaining), desc="Evaluating", unit="ep"):
-            ep_idx = completed + i
-            env.begin_episode("evaluation", ep_idx)     # shared CRN across agents
-            state = env.reset()
-            total_cost = 0.0
-            ep_data = []
-            for t in range(eval_length):
-                action = agent.act(state)
-                _m = dict(getattr(agent, 'step_metrics', None) or {})
-                next_state, cost, done = env.step(state, action)
-                c_travel, c_maint, c_risk = env.last_cost_breakdown
-                total_cost += (gamma ** t) * cost
-                ep_data.append({'t': t, 'state': state.copy(), 'action': action,
-                                'cost': cost, 'c_travel': c_travel, 'c_maint': c_maint,
-                                'c_risk': c_risk, 'agent_metrics': _m})
-                state = next_state
-                # No break on done: simulate the full T + tail horizon.
-            if persist:
-                self.logger.append_episode(ep_idx, ep_data)
-                self.logger.append_agent_metrics(ep_idx, ep_data)
-            episode_costs.append(total_cost)
-            episodes.append(ep_data)
+        if self.config.n_workers > 1 and env is self.env:
+            # Parallel eval — reuse the standard episode worker (shared-CRN keying,
+            # full T+tail horizon). Each worker reconstructs its own env.
+            from multiprocessing import get_context
+            from training.trainer import _run_eval_episode
+            args_list = [
+                (agent, env.config, env.network, self._tap_backend,
+                 self.seed, completed + i, eval_length)
+                for i in range(remaining)
+            ]
+            ctx = get_context('spawn')
+            with ctx.Pool(processes=self.config.n_workers, initializer=_init_worker) as pool:
+                for ep_idx, cost, ep_data in tqdm(
+                    pool.imap_unordered(_run_eval_episode, args_list),
+                    total=remaining, desc="Evaluating", unit="ep",
+                ):
+                    if persist:
+                        self.logger.append_episode(ep_idx, ep_data)
+                        self.logger.append_agent_metrics(ep_idx, ep_data)
+                    episode_costs.append(cost)
+                    episodes.append(ep_data)
+        else:
+            for i in tqdm(range(remaining), desc="Evaluating", unit="ep"):
+                ep_idx = completed + i
+                env.begin_episode("evaluation", ep_idx, self.seed)   # shared CRN across agents
+                state = env.reset()
+                total_cost = 0.0
+                ep_data = []
+                for t in range(eval_length):
+                    action = agent.act(state)
+                    _m = dict(getattr(agent, 'step_metrics', None) or {})
+                    next_state, cost, done = env.step(state, action)
+                    c_travel, c_maint, c_risk = env.last_cost_breakdown
+                    total_cost += (gamma ** t) * cost
+                    ep_data.append({'t': t, 'state': state.copy(), 'action': action,
+                                    'cost': cost, 'c_travel': c_travel, 'c_maint': c_maint,
+                                    'c_risk': c_risk, 'agent_metrics': _m})
+                    state = next_state
+                    # No break on done: simulate the full T + tail horizon.
+                if persist:
+                    self.logger.append_episode(ep_idx, ep_data)
+                    self.logger.append_agent_metrics(ep_idx, ep_data)
+                episode_costs.append(total_cost)
+                episodes.append(ep_data)
 
         all_costs = prior_costs + episode_costs
         return {'mean_cost': float(np.mean(all_costs)),

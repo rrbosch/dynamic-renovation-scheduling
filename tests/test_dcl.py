@@ -174,7 +174,7 @@ def _trainer(env, search, policy, tmp_path, **cfg_kw):
     dec = build_decomposition(search, env, estimator_kind=policy,
                               epochs=5, batch_size=64)
     agent = DCLAgent(dec, _heuristic(env), env, action_search=search)
-    cfg = dict(n_rounds=1, samples_per_round=24, warmup_steps=1, collect_steps=4,
+    cfg = dict(n_rounds=1, samples_per_round=24, collect_steps=4,
                rollout_horizon=3, n_rollouts=3, rollout_selection='fixed',
                n_eval_episodes=2, time_budget=0, T_tail=1.0, seed=0, config_hash='h')
     cfg.update(cfg_kw)
@@ -212,6 +212,33 @@ def test_no_vfa_when_horizon_none(tmp_path):
     assert trainer.value_fn is None                        # faithful: no VFA
 
 
+def test_collection_is_parallelism_invariant(tmp_path):
+    """n_workers=1 and n_workers=2 must yield the IDENTICAL round-0 dataset (pure
+    function of seed/round). Round 0 uses the heuristic base → xgboost-free, so this
+    exercises the spawn-pool path cheaply."""
+    from training.dcl_trainer import DCLTrainer
+    from utils.logging import RunLogger
+
+    def collect(nw):
+        env = _make_env(T=6)
+        dec = build_decomposition('sequential', env, estimator_kind='xgboost')
+        agent = DCLAgent(dec, _heuristic(env), env, action_search='sequential')
+        cfg = DCLConfig(n_rounds=1, samples_per_round=12,
+                        collect_steps=3, rollout_horizon=None, n_rollouts=3,
+                        rollout_selection='fixed', n_workers=nw, tap_backend='null',
+                        T_tail=1.0, seed=0)
+        tr = DCLTrainer(agent, env, cfg, RunLogger(str(tmp_path / f"nw{nw}")))
+        oracle = dec.make_oracle(agent, cfg, seed=tr.seed, value_fn=None)
+        return tr._collect_dataset(oracle, 0)
+
+    s1, l1, _, _ = collect(1)
+    s2, l2, _, _ = collect(2)
+    assert len(s1) == len(s2) > 0
+    assert np.array_equal(np.stack(l1), np.stack(l2))                  # identical labels
+    assert all(np.array_equal(a.features(), b.features())             # identical states
+               for a, b in zip(s1, s2))
+
+
 def test_checkpoint_resume(tmp_path):
     pytest.importorskip("xgboost")
     import os
@@ -227,3 +254,55 @@ def test_checkpoint_resume(tmp_path):
     assert not dec2._fitted
     start = trainer2.load_checkpoint(ckpt)
     assert start == 2 and dec2._fitted                     # restored classifier
+
+
+# ---------------------------------------------------------------------------
+# Inverse-frequency label weighting (opt-in class_weight)
+# ---------------------------------------------------------------------------
+
+def test_class_weights_helper_schemes():
+    """Pure math: 'balanced' ∝ 1/count; 'balanced_sqrt' damps that by a square root."""
+    from agents.dcl import _class_weights
+    counts = np.array([100.0, 4.0])                        # 25:1 imbalance
+    w_bal = _class_weights(counts, "balanced")
+    w_sqrt = _class_weights(counts, "balanced_sqrt")
+    assert np.allclose(w_bal, 1.0 / counts)               # pure inverse frequency
+    assert np.isclose(w_bal[1] / w_bal[0], 25.0)          # minority:majority weight ratio
+    assert np.isclose(w_sqrt[1] / w_sqrt[0], 5.0)         # sqrt-damped ⇒ sqrt(25)
+
+
+@pytest.mark.parametrize("policy", ["xgboost", "nn"])
+def test_class_weight_recovers_starved_minority(policy):
+    """On a heavily imbalanced, overlapping 2-class problem the unweighted fit
+    starves the rare class; sqrt-damped weighting recovers its recall. For the NN
+    we seed torch so the two fits share an identical init and only the loss
+    weighting differs."""
+    pytest.importorskip("xgboost")
+    if policy == "nn":
+        pytest.importorskip("torch")
+    from agents.dcl import _make_estimator
+
+    rng = np.random.default_rng(0)
+    X_maj = rng.normal(0.0, 1.0, size=(700, 2))
+    X_min = rng.normal(1.8, 1.0, size=(18, 2))            # rare, overlapping class
+    X = np.vstack([X_maj, X_min])
+    y = np.concatenate([np.zeros(700, int), np.ones(18, int)])
+    X_test_min = rng.normal(1.8, 1.0, size=(300, 2))      # held-out minority cluster
+    clf_kw = ({"n_estimators": 60, "max_depth": 3, "subsample": 1.0,
+               "random_state": 0, "learning_rate": 0.3}
+              if policy == "xgboost" else None)
+
+    def minority_recall(cw):
+        if policy == "nn":
+            import torch
+            torch.manual_seed(0)                          # identical init ⇒ isolate weighting
+        est = _make_estimator(policy, in_dim=2, n_classes=2, hidden_dims=[32, 32],
+                              epochs=120, batch_size=64, clf_kwargs=clf_kw,
+                              class_weight=cw)
+        est.fit(X, y)
+        return float((est.predict(X_test_min) == 1).mean())
+
+    rec_none = minority_recall(None)
+    rec_wt = minority_recall("balanced_sqrt")
+    assert rec_none < 0.9                                  # unweighted starves the rare class
+    assert rec_wt > rec_none                               # sqrt-damped weights recover it

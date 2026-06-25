@@ -72,13 +72,15 @@ def make_config(ag, init, buf, vfa):
             "action_gen": ACTION_GEN[ag],
             "extra": {
                 "init_action": init,   # 'empty' | 'policy'
-                # (c) per-epoch advantage baseline — enabled for the NN VFA, where
-                # the raw cost-to-go target's epoch-trend variance swamps the
-                # act-vs-wait signal. Validated to pair with fix (b) acting
-                # warmstart coverage (on by default via training.warmstart_explore_*):
-                # (b)+(c) ~2.9x better online cost than the old config on a 240s
-                # smoke. XGBoost is scale-invariant so leaves it off (no effect).
-                **({"advantage_baseline": True} if vfa == "nn" else {}),
+                # (c) per-epoch advantage baseline — now enabled for ALL VFAs
+                # (was NN-only). The raw cost-to-go target's variance is ~94%
+                # epoch-trend b(t), which swamps the act-vs-wait advantage signal;
+                # subtracting b(t) focuses the fit on the controllable signal. This
+                # is a TARGET-variance argument, independent of XGBoost's feature
+                # scale-invariance — see docs/adp_value_fn_improvements.md
+                # (calibration analysis). Pairs with fix (b) acting warmstart
+                # coverage (on by default via training.warmstart_explore_*).
+                "advantage_baseline": True,
             },
         },
     }

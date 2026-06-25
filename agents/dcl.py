@@ -46,6 +46,21 @@ from env.mdp import State, InfraEnv, EnvConfig
 # Estimators (per-row classifiers shared by all decompositions)
 # ===========================================================================
 
+def _class_weights(counts: np.ndarray, scheme: str) -> np.ndarray:
+    """Per-class weights from a class-count vector, for opt-in label balancing.
+
+    The DCL labels are dominated by the do-nothing majority (the rare maintenance
+    actions — esp. renovate — carry the cost signal but are starved), so an
+    unweighted fit effectively ignores them. Schemes:
+      'balanced'      → w ∝ 1/count        (pure inverse-frequency)
+      'balanced_sqrt' → w ∝ 1/sqrt(count)  (damped; gentler on tiny classes)
+    The caller renormalises. Returns shape (K,)."""
+    base = 1.0 / np.maximum(counts.astype(float), 1.0)      # inverse frequency
+    if scheme == 'balanced_sqrt':
+        base = np.sqrt(base)
+    return base
+
+
 class _XGBEstimator:
     """xgboost multiclass classifier over prepared feature rows. Refit from
     scratch each round (DCL trains the classifier afresh on the new dataset)."""
@@ -59,9 +74,11 @@ class _XGBEstimator:
         'verbosity': 0,
     }
 
-    def __init__(self, n_classes: int, params: dict | None = None):
+    def __init__(self, n_classes: int, params: dict | None = None,
+                 class_weight: str | None = None):
         self.n_classes = int(n_classes)
         self.params = {**self.DEFAULT_PARAMS, **(params or {})}
+        self.class_weight = class_weight   # None | 'balanced' | 'balanced_sqrt'
         self._clf = None
         self._classes = None       # original integer labels present at fit time
         self._constant = None      # set when a round's labels are a single class
@@ -82,7 +99,16 @@ class _XGBEstimator:
         self._constant = None
         enc = np.searchsorted(self._classes, y)
         self._clf = xgb.XGBClassifier(**self.params)
-        self._clf.fit(np.asarray(X, dtype=np.float32), enc)
+        X = np.asarray(X, dtype=np.float32)
+        if self.class_weight:
+            # Inverse-frequency row weights over the present (dense) classes;
+            # renorm so Σw = n keeps the effective sample size (and LR) stable.
+            counts = np.bincount(enc, minlength=self._classes.size)
+            w = _class_weights(counts, self.class_weight)[enc]
+            w = w / w.sum() * len(w)
+            self._clf.fit(X, enc, sample_weight=w)
+        else:
+            self._clf.fit(X, enc)
         self._fitted = True
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -93,11 +119,22 @@ class _XGBEstimator:
         enc = self._clf.predict(np.asarray(X, dtype=np.float32)).astype(int)
         return self._classes[enc].astype(int)       # map dense index → orig label
 
+    def set_predict_threads(self, n: int) -> None:
+        """Cap xgboost predict threads. The model is fit with n_jobs=-1; inside a
+        process pool each worker must use 1 thread (OMP_NUM_THREADS alone does not
+        override the model's nthread) to avoid n_workers × n_cores oversubscription."""
+        if self._clf is not None:
+            try:
+                self._clf.set_params(n_jobs=n)
+            except Exception:
+                pass
+
     def save(self, path: str) -> None:
         with open(path, 'wb') as f:
             pickle.dump({'clf': self._clf, 'fitted': self._fitted,
                          'constant': self._constant, 'classes': self._classes,
-                         'n_classes': self.n_classes, 'params': self.params}, f)
+                         'n_classes': self.n_classes, 'params': self.params,
+                         'class_weight': self.class_weight}, f)
 
     def load(self, path: str) -> None:
         with open(path, 'rb') as f:
@@ -105,6 +142,7 @@ class _XGBEstimator:
         self._clf, self._fitted = d['clf'], d['fitted']
         self._constant = d.get('constant')
         self._classes = d.get('classes')
+        self.class_weight = d.get('class_weight')
         self.n_classes, self.params = d['n_classes'], d['params']
 
 
@@ -114,13 +152,15 @@ class _MLPEstimator:
     for conditioning); trained multi-epoch with cross-entropy each round."""
 
     def __init__(self, in_dim: int, n_classes: int, hidden_dims=None,
-                 lr: float = 1e-3, epochs: int = 30, batch_size: int = 256):
+                 lr: float = 1e-3, epochs: int = 30, batch_size: int = 256,
+                 class_weight: str | None = None):
         self.in_dim = int(in_dim)
         self.n_classes = int(n_classes)
         self.hidden_dims = list(hidden_dims) if hidden_dims else [256, 256]
         self.lr = float(lr)
         self.epochs = int(epochs)
         self.batch_size = int(batch_size)
+        self.class_weight = class_weight   # None | 'balanced' | 'balanced_sqrt'
         self._model = None
         self._mu = None
         self._sd = None
@@ -148,6 +188,13 @@ class _MLPEstimator:
         self._sd = X.std(axis=0) + 1e-6
         Xn = torch.tensor((X - self._mu) / self._sd, dtype=torch.float32)
         Y = torch.tensor(y, dtype=torch.long)
+        # Opt-in per-class loss weighting (torch's native cross_entropy weight) to
+        # counter the do-nothing label majority; None ⇒ identical to the old loss.
+        weight = None
+        if self.class_weight:
+            counts = np.bincount(y, minlength=self.n_classes)
+            cw = _class_weights(counts, self.class_weight)
+            weight = torch.tensor(cw / cw.sum() * self.n_classes, dtype=torch.float32)
         opt = torch.optim.Adam(self._model.parameters(), lr=self.lr)
         n = len(Xn)
         self._model.train()
@@ -156,7 +203,7 @@ class _MLPEstimator:
             for b in range(0, n, self.batch_size):
                 idx = perm[b:b + self.batch_size]
                 logits = self._model(Xn[idx])
-                loss = F.cross_entropy(logits, Y[idx])
+                loss = F.cross_entropy(logits, Y[idx], weight=weight)
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
@@ -192,13 +239,15 @@ class _MLPEstimator:
 
 def _make_estimator(kind: str, in_dim: int, n_classes: int, *,
                     hidden_dims=None, lr=1e-3, epochs=30, batch_size=256,
-                    clf_kwargs=None):
+                    clf_kwargs=None, class_weight=None):
     if kind == 'xgboost':
-        return _XGBEstimator(n_classes=n_classes, params=clf_kwargs)
+        return _XGBEstimator(n_classes=n_classes, params=clf_kwargs,
+                             class_weight=class_weight)
     if kind == 'nn':
         return _MLPEstimator(in_dim=in_dim, n_classes=n_classes,
                              hidden_dims=hidden_dims, lr=lr,
-                             epochs=epochs, batch_size=batch_size)
+                             epochs=epochs, batch_size=batch_size,
+                             class_weight=class_weight)
     raise ValueError(f"Unknown estimator kind: {kind!r}")
 
 
@@ -214,18 +263,24 @@ class _BaseDecomposition:
 
     def __init__(self, env: InfraEnv, estimator_kind: str = 'xgboost',
                  use_global_context: bool = True, hidden_dims=None, lr=1e-3,
-                 epochs=30, batch_size=256, clf_kwargs=None):
+                 epochs=30, batch_size=256, clf_kwargs=None, class_weight=None):
         self.env = env
         self.cfg = env.config
         self.estimator_kind = estimator_kind
         self.use_global_context = use_global_context
         self._est_kwargs = dict(hidden_dims=hidden_dims, lr=lr, epochs=epochs,
-                                batch_size=batch_size, clf_kwargs=clf_kwargs)
+                                batch_size=batch_size, clf_kwargs=clf_kwargs,
+                                class_weight=class_weight)
         self.est = None  # built lazily once in/out dims are known
 
     @property
     def _fitted(self) -> bool:
         return self.est is not None and self.est._fitted
+
+    def set_predict_threads(self, n: int) -> None:
+        """Cap the classifier's predict threads (process-pool workers use 1)."""
+        if self.est is not None and hasattr(self.est, 'set_predict_threads'):
+            self.est.set_predict_threads(n)
 
     # -- oracle ------------------------------------------------------------
     def make_oracle(self, base_policy, dcl_cfg, seed: int, value_fn=None):

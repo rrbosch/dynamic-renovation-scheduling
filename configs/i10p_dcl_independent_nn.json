@@ -2,7 +2,7 @@
   "network": "sioux_falls",
   "tap_backend": "fast",
   "seed": 42,
-  "run_name": "exp0/i10p_dcl_seq_xgb",
+  "run_name": "exp0/i10p_dcl_independent_nn",
   "instance": "instances/instance_10p.json",
   "training": {
     "eval_interval": 1,
@@ -14,8 +14,8 @@
     "agent_type": "dcl",
     "extra": {
       "class_weight": "balanced_sqrt",
-      "action_search": "sequential",
-      "policy_type": "xgboost",
+      "action_search": "independent",
+      "policy_type": "nn",
       "n_rounds": 100,
       "samples_per_round": 5000,
       "collect_steps": 0,
@@ -24,7 +24,14 @@
       "rollout_selection": "fixed",
       "action_threshold": 0.5,
       "initial_action": "policy",
-      "use_global_context": true,
+      "finite_horizon": true,
+      "hidden_dims": [
+        256,
+        256
+      ],
+      "policy_lr": 0.001,
+      "policy_epochs": 40,
+      "policy_batch_size": 256,
       "heuristic_policy": {
         "agent_type": "reactiveperasset",
         "extra": {

@@ -10,9 +10,9 @@ and why* the previous implementation (preserved at `agents/dcl_old.py`) deviated
 
 Approximate policy iteration that casts control as **classification**. For `n`
 rounds: (1) collect a fresh **on-policy** dataset under the current policy π_i
-(warm-up L steps, then step forward and label each visited state with the
-rollout-**improved** action found by a simulation oracle — **Sequential Halving +
-Common Random Numbers** — with budget B_s = M·|A_s|); (2) train a neural-network
+(step forward and label each visited state with the rollout-**improved** action
+found by a simulation oracle — **Sequential Halving + Common Random Numbers** —
+with budget B_s = M·|A_s|); (2) train a neural-network
 **classifier** from scratch on the (state, best-action) pairs → π_{i+1}; (3)
 π_{i+1} becomes the base/rollout policy for the next round. Canonical DCL is
 **value-function-free**; the deployed policy is just the classifier (cheap argmax).
@@ -29,7 +29,7 @@ Common Random Numbers** — with budget B_s = M·|A_s|); (2) train a neural-netw
 | 6 | — | `action_gen`/`_n_updates` dead; resume didn't persist the switch | Leftover scaffolding | Removed; `DCLTrainer` checkpoints `{round, classifier, VFA}` and resumes |
 | 7 | Classifier trained to convergence each round | `NNPolicy.fit` did **one** gradient step | Built for the online loop | `_MLPEstimator` trains multi-epoch with frozen input normalisation |
 
-## The one necessary adaptation: SH over a combinatorial action space
+## Necessary adaptation (1): SH over a combinatorial action space
 
 Published DCL applies Sequential Halving to the enumerable action set `A_s`. Here
 the **joint** action is `(a_1,…,a_N) ∈ {none,repair,renovate,restrict}^N`, i.e.
@@ -55,6 +55,20 @@ CRN is supplied by `rollout_noise` (`agents/rollout.py`), whose key **excludes t
 candidate action**, so all arms in an SH round replay identical exogenous
 scenarios (positive covariance ⇒ variance reduction), exactly as the paper
 prescribes.
+
+## Necessary adaptation (2): finite horizon ⇒ no burn-in
+
+Published DCL targets stationary / effectively infinite-horizon control, where data
+collection **burns in L steps** before labelling so states are drawn from the policy's
+*stationary* distribution (the epoch index is irrelevant). This MDP is **finite-horizon**
+(`eval_length = T + tail`): the optimal action is time-indexed and the classifier
+conditions on `t`. A burn-in would label only the horizon's tail and leave the first L
+epochs **unlabelled**, yet the deployed classifier runs from t=0 — out-of-distribution
+exactly at the start. So the rebuild **drops the burn-in** (`warmup_steps` removed): every
+collection episode labels from **t=0**, covering the full horizon the policy is deployed
+over. (`collect_steps`, a separate per-episode label cap, defaults to `0` = label to
+episode end, preserving full coverage; setting it >0 would re-introduce a *tail* hole and
+should be used with care.)
 
 ## Optional truncated-rollout VFA (compute shortcut)
 

@@ -267,22 +267,24 @@ decompositions × {xgboost, nn}, VFA opt-in build+fit, checkpoint resume.
 > (NullTAP, no numba) and tiny budgets — it proves correctness, **not** policy
 > quality. Real screening needs FastTAP (`tap_backend:"fast"`, the committed
 > default), the real travel-cost signal, a proper training budget, and the
-> cross-check vs MC rollout. Two caveats for sizing the jobs:
-> - **DCL collection is currently single-core** (`DCLTrainer` does not yet
->   parallelize state collection across `n_workers`; eval is also serial). Each
->   run is serial → parallelise across the grid via the SLURM **job array**, not
->   within a run. (Parallel collection is a worthwhile follow-up given the heavy
->   per-step TAP solve — that is what the `rollout_horizon`+VFA shortcut targets.)
-> - **Use the tuned per-asset heuristic as the base policy** (`heuristic_policy`),
->   not plain reactive(0.8): inject the 0a `reactiveperasset` best-params via
->   `apply_optuna_params.py` (same heuristic the rollout/ADP consumers use) so
->   round-0 labels start from a strong policy.
+> cross-check vs MC rollout. Notes for sizing the jobs:
+> - **Multiprocessing IS supported** (added after the rebuild): `DCLTrainer`
+>   parallelises both collection (DCL's "W threads" — per-episode labelling is
+>   embarrassingly parallel) and evaluation across `training.n_workers` processes
+>   (set to **16** in the configs); the classifier *fit* also uses cores via
+>   xgboost/torch threads. Parallelism-invariant — a pure function of seed/round
+>   (`tests/test_dcl.py::test_collection_is_parallelism_invariant`). So a single
+>   run saturates its 16 cores; the SLURM array parallelises *across* configs too.
+> - **Use the tuned per-asset heuristic as the base policy** (`heuristic_policy`):
+>   already injected into the committed configs (`reactiveperasset`, 0a best-params)
+>   so round-0 labels start from a strong policy.
 
 **Proposed Phase-1 grid on `instance_10p`** (base = `sequential` + `xgboost` +
 `fixed` + no-VFA; one-factor-at-a-time around it). Shared held-constant settings:
-`n_rounds=5`, `samples_per_round≈3000`, `warmup_steps=100`, fixed/SH budget
+`n_rounds=5`, `samples_per_round≈3000`, fixed/SH budget
 `n_rollouts=20`, `action_threshold=0.5`, tuned `reactiveperasset` base,
-`n_eval_episodes=50`, `tap_backend:"fast"`. Screen at `seed=42`; re-run winners at
+`n_eval_episodes=50`, `tap_backend:"fast"`. **No burn-in** (`warmup_steps` removed —
+finite horizon; collection labels from t=0). Screen at `seed=42`; re-run winners at
 5 seeds (Exp-1 convention).
 
 *A. Architecture sweep* — which decomposition × classifier (6 cells, faithful default `fixed`/no-VFA):
@@ -290,29 +292,38 @@ decompositions × {xgboost, nn}, VFA opt-in build+fit, checkpoint resume.
 | action_search | xgboost | nn |
 |---|---|---|
 | sequential   | `i10p_dcl_seq_xgb` ✅ | `i10p_dcl_seq_nn` ✅ |
-| independent  | `i10p_dcl_independent_xgb` ✅ | `i10p_dcl_independent_nn` ⬜ |
-| local_search | `i10p_dcl_localsearch_xgb` ⬜ | `i10p_dcl_localsearch_nn` ✅ |
+| independent  | `i10p_dcl_independent_xgb` ✅ | `i10p_dcl_independent_nn` ✅ |
+| local_search | `i10p_dcl_localsearch_xgb` ✅ | `i10p_dcl_localsearch_nn` ✅ |
 
 *B. Rollout-elimination sweep* — does SH/Wilcoxon cut sims vs `fixed` at equal label quality? (hold `sequential`+`xgboost`+no-VFA):
 
 | selection | config |
 |---|---|
 | fixed (base) | `i10p_dcl_seq_xgb` ✅ |
-| wilcoxon | `i10p_dcl_seq_xgb_wilcoxon` ⬜ |
-| sequential_halving | `i10p_dcl_seq_xgb_sh` ⬜ |
+| wilcoxon | `i10p_dcl_seq_xgb_wilcoxon` ✅ |
+| sequential_halving | `i10p_dcl_seq_xgb_sh` ✅ |
 
 *C. VFA-shortcut sweep* — does truncated-rollout + VFA preserve quality while cutting the TAP cost? (hold `sequential`+`xgboost`):
 
 | rollout_horizon / selection | config |
 |---|---|
 | null / fixed (base, value-fn-free) | `i10p_dcl_seq_xgb` ✅ |
-| 20 / fixed | `i10p_dcl_seq_xgb_vfa` ⬜ |
+| 20 / fixed | `i10p_dcl_seq_xgb_vfa` ✅ |
 | 20 / sequential_halving | `i10p_dcl_seq_xgb_vfa_sh` ✅ |
 
-✅ = config exists; ⬜ = one-line edit of the shared template (≈10 configs total).
-Compare all on the shared-CRN eval against `i10p_rollout_policy` (anytime upper
-bound) and the 0a heuristics; DCL's edge is **cheap deployment** (classifier
-argmax) vs rollout's per-step search.
+**All 10 configs now exist**, per-asset base policy injected (`apply_optuna_params.py
+--block heuristic_policy`), all build-canaried OK. **Registry idx 37-46** (DCL block);
+dispatch with `sbatch --array=37-46 hpc/submit_array.sh` (can run concurrently with the
+ADP array — QOS allows 128 jobs). Compare all on the shared-CRN eval against
+`i10p_rollout_policy` (anytime upper bound) and the 0a heuristics; DCL's edge is **cheap
+deployment** (classifier argmax) vs rollout's per-step search.
+
+> **Sizing note:** all 10 configs now set `n_workers:16` (DCLTrainer parallelises collection
+> + eval — see the caveat above) but still use the **verification** loop sizing `n_rounds=3,
+> samples_per_round=1000, n_rollouts=10`, *not* the heavier screen sizing in the prose above
+> (`n_rounds=5, samples≈3000, n_rollouts=20`). Decide before launch whether to bump — heavier =
+> better labels, and now affordable since each cell saturates its 16 cores (near-linear scaling
+> expected under FastTAP with hundreds of label tasks/round).
 
 ---
 
