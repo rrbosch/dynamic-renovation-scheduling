@@ -30,9 +30,13 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INJECTOR = PROJECT_ROOT / "experiments" / "apply_optuna_params.py"
 
-PERASSET_PARAMS = PROJECT_ROOT / "results" / "exp0" / "i10p_optuna_perasset" / "best_params.json"
-REACTIVE_PARAMS = PROJECT_ROOT / "results" / "exp0" / "i10p_optuna_reactive" / "best_params.json"
-PACED_PARAMS    = PROJECT_ROOT / "results" / "exp0" / "i10p_optuna_paced" / "best_params.json"
+# Bundled fixtures (self-contained — do NOT depend on gitignored results/ run outputs).
+# Parent dir names end with the heuristic keyword so apply_optuna_params._infer_heuristic
+# resolves reactive/paced/reactiveperasset from the path.
+_FIX = PROJECT_ROOT / "tests" / "fixtures"
+PERASSET_PARAMS = _FIX / "i10p_optuna_perasset" / "best_params.json"
+REACTIVE_PARAMS = _FIX / "i10p_optuna_reactive" / "best_params.json"
+PACED_PARAMS    = _FIX / "i10p_optuna_paced" / "best_params.json"
 
 ADP_CONFIG     = PROJECT_ROOT / "configs" / "i10p_adp_normal_policy_fifo_xgb.json"
 ROLLOUT_CONFIG = PROJECT_ROOT / "configs" / "i10p_rollout_policy.json"
