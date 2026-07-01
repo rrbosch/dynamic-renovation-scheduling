@@ -1,6 +1,6 @@
 # ---- Generated experiment outputs (regenerable from instances + configs + seeds) ----
 results/
-temp/
+scratch/
 hpc log/
 hpc_log/
 

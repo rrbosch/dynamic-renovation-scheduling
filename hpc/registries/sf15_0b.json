@@ -1,0 +1,137 @@
+[
+  {
+    "config": "configs/sf15_ppo_curriculum.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_rollout_empty.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_rollout_policy.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_seq_rollout_empty.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_seq_rollout_policy.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_ctrl_emptyinit.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_ctrl_lowesterror.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_ctrl_noflip.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_ctrl_seq.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_nn_aboff_ns4.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_nn_aboff_nsfull.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_nn_abon_ns4.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_nn_abon_nsfull.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_xgb_aboff_ns4.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_xgb_aboff_nsfull.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_xgb_abon_ns4.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_adp2_xgb_abon_nsfull.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_dcl_independent_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_dcl_independent_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_dcl_localsearch_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_dcl_localsearch_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_dcl_seq_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_dcl_seq_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_dcl_seq_xgb_sh.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_dcl_seq_xgb_vfa.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_dcl_seq_xgb_vfa_sh.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf15_dcl_seq_xgb_wilcoxon.json",
+    "run_name": null,
+    "seed": null
+  }
+]
