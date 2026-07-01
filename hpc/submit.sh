@@ -1,49 +1,30 @@
 #!/bin/bash
-# SLURM job script — allocates nodes and starts HyperQueue workers.
-# Submit with: sbatch hpc/submit.sh
+# Thin submit wrapper: derive a descriptive SLURM job name from the registry filename,
+# then dispatch the array via hpc/submit_array.sh.
 #
-# Full execution procedure (run from login node after ssh into Snellius):
+# Job-name convention: hpc/registries/<experiment>_<appendix>.json  ->  rl_<experiment>_<appendix>
+#   (appendix optional, e.g. v2, sf15). Logs land at hpc/logs/rl_<...>_<jobid>_<task>.{out,err}.
 #
-#   cd ~/Code_v2/
+# Usage:
+#   bash hpc/submit.sh <registry.json> <array-spec>
+#   e.g.  bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7      # job rl_sf24_0a, tasks 0..7
+#         bash hpc/submit.sh hpc/registries/sf24_0a.json 2        # single smoke task
 #
-#   # 1. Load modules and start HQ server (skip if already running)
-#   module load 2023 && module load HyperQueue/0.19.0
-#   hq server info || nohup hq server start &
+# (Equivalent explicit form:
+#    sbatch --job-name=rl_sf24_0a --array=0-7 hpc/submit_array.sh hpc/registries/sf24_0a.json )
 #
-#   # 2. Generate experiment registry
-#   python hpc/generate_registry.py --configs configs/exp1_*.json --seeds 0 1 2 3 4
-#   # → prints: "N experiments queued → update --array 0-{N-1}"
-#
-#   # 3. Submit task array to HQ (update N to match step 2 output)
-#   hq submit --array 0-{N-1} --pin taskset --cpus=1 hpc/hq_task.sh
-#
-#   # 4. Submit this SLURM job to spawn workers
-#   sbatch hpc/submit.sh
-#
-#   # 5. Monitor
-#   hq job list
-#   hq job progress <job_id>
-#   hq task list <job_id> | grep FAILED | wc -l
-#
-#   # Cleanup
-#   hq job cancel all       # cancel pending/running tasks
-#   hq server stop          # shut down when done
+# The HQ worker-spawn script that used to live here is deprecated — the SLURM job array
+# (submit_array.sh) needs no login-node daemon. See git history for the old HyperQueue path.
+set -e
 
-#SBATCH --job-name=rl_infra
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=128
-#SBATCH --time=24:00:00
-#SBATCH --output=hpc/logs/slurm_%j.out
-#SBATCH --error=hpc/logs/slurm_%j.err
-#SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=robbert.bosch@pm.me
+reg="${1:?usage: bash hpc/submit.sh <registry.json> <array-spec>   e.g. hpc/registries/sf24_0a.json 0-7}"
+array="${2:?missing array spec, e.g. 0-7 or 2 or 1,5,9}"
 
-module load 2023
-module load HyperQueue/0.19.0
+if [[ ! -f "$reg" ]]; then
+    echo "ERROR: registry not found: $reg" >&2
+    exit 1
+fi
 
-mkdir -p ~/Code_v2/hpc/logs
-
-# Auto-detect all 128 CPUs; with --cpus=8 per HQ task this gives 16 concurrent tasks per node
-hq worker start &
-wait
+name="rl_$(basename "${reg%.json}")"
+echo "Submitting: job-name=$name  registry=$reg  array=$array"
+sbatch --job-name="$name" --array="$array" hpc/submit_array.sh "$reg"

@@ -62,25 +62,39 @@ Replication policy is **per experiment** (see [../EXPERIMENTS.md](../EXPERIMENTS
   `run_name = "<config_stem>/s<seed>"` and a distinct `seed`, so results nest under
   `results/<config_stem>/s<seed>/` and the dashboard aggregates seeds per experiment.
 
+## Registry files & job names
+
+Registries are **named per-experiment files** under `hpc/registries/`, one per dispatch batch, so
+several can be pre-created and submitted independently. The filename drives the SLURM job name:
+
+```
+hpc/registries/<experiment>_<appendix>.json   ->   job name  rl_<experiment>_<appendix>
+                                              ->   logs       hpc/logs/rl_<...>_<jobid>_<task>.{out,err}
+```
+`<appendix>` is optional (e.g. `v2`, `sf15`). Examples: `sf24_0a.json → rl_sf24_0a`,
+`sf24_0b_adp_v2.json → rl_sf24_0b_adp_v2`. The thin wrapper `hpc/submit.sh <registry> <array>`
+derives the name; `submit_array.sh` takes the registry as its first argument and passes it to
+`run_task.py --registry`. Archived registries live under `hpc/registries/_archive/`.
+
 ## Regenerating the registry
 
-**Exp 0** — 1 replication per config; learners first (so they occupy the low indices for an 8-core
-array), Optuna appended (high indices, 1-core array):
+**Exp 0** — 1 replication per config. Build a named registry per batch, then submit it:
 
 ```bash
-# Learners: 1 run each  (24 ADP + 4 rollout + 1 PPO = 29 configs)
-python hpc/generate_registry.py \
-    --configs configs/i10p_adp_*.json configs/i10p_rollout_*.json \
-              configs/i10p_seq_rollout_*.json configs/i10p_ppo_curriculum.json
+# 0A heuristics on sf24 (8 optuna configs), single-threaded (n_workers=1):
+python hpc/generate_registry.py --configs configs/sf24_optuna_*.json \
+    --output hpc/registries/sf24_0a.json
+bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7        # job rl_sf24_0a
 
-# Optuna heuristics: append  (3 configs)
-python hpc/generate_registry.py --configs configs/i10p_optuna_*.json --append
-
-# Total: 32 runs. Submit as two arrays (different --cpus per group):
-#   hq submit --array 0-28  --pin taskset --cpus=8 hpc/hq_task.sh   # learners
-#   hq submit --array 29-31 --pin taskset --cpus=1 hpc/hq_task.sh   # optuna
+# 0B learners on sf24 (regenerated after 0A):
+python hpc/generate_registry.py --configs configs/sf24_adp2_*.json configs/sf24_dcl_*.json \
+    configs/sf24_rollout_*.json configs/sf24_ppo_*.json --output hpc/registries/sf24_0b.json
+bash hpc/submit.sh hpc/registries/sf24_0b.json 0-<N-1>    # job rl_sf24_0b
 ```
+(`generate_registry.py` prints the exact `bash hpc/submit.sh ... 0-<N-1>` line for the batch it wrote.
+Keep Optuna configs on their own registry — they run single-threaded, `--cpus-per-task=1` is enough,
+though the shared 16-core slot is billed regardless.)
 
-**Exp 1 / Exp 2** — same pattern but add `--seeds 0 1 2 3 4` to the learner call (Optuna stays
+**Exp 1 / Exp 2** — same pattern with `--seeds 0 1 2 3 4` on the learner call (Optuna stays
 un-seeded). `generate_registry.py` skips already-finished runs (by `run_name`), so re-running after a
 partial batch only enqueues what's left.
