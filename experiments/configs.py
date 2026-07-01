@@ -136,9 +136,11 @@ def build_experiment(config: ExperimentConfig):
         _alpha0 = np.asarray(inst['alpha0'], dtype=float)
         _T_tail = float(np.mean(_beta / _alpha0))
 
-    # 2. Network — pass n_assets from instance
+    # 2. Network — pass n_assets (and optional explicit high-synergy link
+    #    selection) from instance. Each asset is one bidirectional link.
     if config.network == 'sioux_falls':
-        network = load_sioux_falls(n_assets=inst['n_assets'])
+        network = load_sioux_falls(
+            n_assets=inst['n_assets'], asset_links=inst.get('asset_links'))
     elif config.network == 'amsterdam':
         network = load_amsterdam()
     else:
@@ -237,11 +239,6 @@ def build_experiment(config: ExperimentConfig):
         n_eval_episodes=tc_dict.get('n_eval_episodes', 10),
         n_warmstart_states=int(tc_dict.get('n_warmstart_states', 0)),
         warmstart_agent_config=tc_dict.get('warmstart', None),
-        warmstart_explore_p_base=float(tc_dict.get('warmstart_explore_p_base', 1.0 / 120)),
-        warmstart_explore_p_high=float(tc_dict.get('warmstart_explore_p_high', 0.50)),
-        warmstart_explore_d_ref=float(tc_dict.get('warmstart_explore_d_ref', 0.5)),
-        warmstart_explore_act_bias=float(tc_dict.get('warmstart_explore_act_bias', 0.9)),
-        warmstart_explore_renovate_bias=float(tc_dict.get('warmstart_explore_renovate_bias', 0.7)),
         checkpoint_interval=int(tc_dict.get('checkpoint_interval', 0)),
         checkpoint_interval_seconds=float(tc_dict.get('checkpoint_interval_seconds', 1800.0)),
         config_hash=_config_hash,
@@ -554,6 +551,16 @@ _HOLDING_EXTRA_KEYS = {'threshold', 'max_concurrent', 'defer_window',
                        'restrict_flow_quantile'}
 _VALUEDENSITY_EXTRA_KEYS = {'max_concurrent', 'risk_weight', 'degrad_weight', 'threshold'}
 _WORSTFIRST_EXTRA_KEYS = {'max_concurrent', 'threshold', 'use_length'}
+_CLAIRVOYANT_EXTRA_KEYS = {'use_dp', 'warm_start', 'max_sweeps', 'time_budget_s',
+                          'n_grid', 'nf_max'}
+_EXPLORE_FLIP_EXTRA_KEYS = {'base', 'p_base', 'p_high', 'd_ref', 'act_bias', 'renovate_bias'}
+_FLIP_SEED_SALT = 0x666C6970  # 'flip' — keep the flip rng stream independent
+_MIXTURE_EXTRA_KEYS = {'policies'}
+# Allowed keys for one entry of a mixture's `policies` list.
+_MIXTURE_ENTRY_KEYS = {'weight', 'agent_type', 'extra', 'value_fn', 'action_gen'}
+_MIXTURE_SAMPLED_ENTRY_KEYS = {'weight', 'agent_type', 'renovate_range',
+                               'repair_gap_range', 'restrict_gap_range'}
+_MIXTURE_SEED_SALT = 0x6D6978  # 'mix' — keep the mixture rng independent of the flip rng
 
 
 def _asset_flow_proxy(env: InfraEnv) -> np.ndarray:
@@ -583,6 +590,43 @@ def _perasset_thresholds_from_extra(extra: dict, n: int) -> np.ndarray:
         [extra[f'restrict_threshold_{i}'] for i in range(n)],
         [extra[f'renovate_threshold_{i}'] for i in range(n)],
     ])  # shape (N, 3)
+
+
+def _mixture_policy_factory(p: dict, env: InfraEnv, seed: int):
+    """Build a ``factory(rng) -> Agent`` for one entry of a mixture's ``policies`` list.
+
+    ``agent_type == 'reactive_sampled'`` is a pseudo-type valid ONLY inside a mixture:
+    each episode it samples thresholds ``res <= rep <= ren`` (renovate from
+    ``renovate_range``; repair/restrict offset below it by ``repair_gap_range`` /
+    ``restrict_gap_range``) and returns a fresh ``ReactiveAgent``. Any other agent_type
+    is a normal spec, built once (the factory ignores ``rng`` and returns it)."""
+    pt = p.get('agent_type')
+    if pt == 'reactive_sampled':
+        unknown = set(p) - _MIXTURE_SAMPLED_ENTRY_KEYS
+        if unknown:
+            raise ValueError(
+                f"Unknown key(s) in mixture 'reactive_sampled' entry: {sorted(unknown)}; "
+                f"valid: {sorted(_MIXTURE_SAMPLED_ENTRY_KEYS)}")
+        from agents.heuristics import ReactiveAgent
+        cfg = env.config
+        ren_r = tuple(p.get('renovate_range', (0.55, 1.0)))
+        rep_g = tuple(p.get('repair_gap_range', (0.05, 0.30)))
+        res_g = tuple(p.get('restrict_gap_range', (0.05, 0.30)))
+
+        def factory(rng, cfg=cfg, ren_r=ren_r, rep_g=rep_g, res_g=res_g):
+            ren = float(rng.uniform(*ren_r))
+            rep = max(0.0, ren - float(rng.uniform(*rep_g)))
+            res = max(0.0, rep - float(rng.uniform(*res_g)))
+            return ReactiveAgent(ren, cfg, repair_threshold=rep, restrict_threshold=res)
+        return factory
+
+    unknown = set(p) - _MIXTURE_ENTRY_KEYS
+    if unknown:
+        raise ValueError(
+            f"Unknown key(s) in mixture policy entry (agent_type={pt!r}): {sorted(unknown)}; "
+            f"valid: {sorted(_MIXTURE_ENTRY_KEYS)}")
+    sub = _build_agent(AgentConfig.from_dict(p), env, seed)   # 'weight' ignored by from_dict
+    return lambda rng, sub=sub: sub
 
 
 def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers: int = 1) -> Agent:
@@ -689,7 +733,8 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
             # the warmstart heuristic's action). The warmstart_policy itself is
             # attached in build_experiment, which can see training.warmstart.
             return ADPAgent(vf, ag, env, TrainingConfig(), finite_horizon=finite_horizon,
-                            init_action_mode=extra.get('init_action', 'empty'))
+                            init_action_mode=extra.get('init_action', 'empty'),
+                            n_step=int(extra.get('n_step', 0)))
 
         if at == 'dqn':
             from agents.dqn import DQNAgent
@@ -782,6 +827,64 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
         heuristic = _build_agent(AgentConfig.from_dict(heuristic_cfg), env, seed)
         return DCLAgent(policy=decomposition, base_heuristic=heuristic,
                         env=env, action_search=action_search)
+
+    if at == 'clairvoyant':
+        # Perfect-information (wait-and-see) baseline. Solves a per-seed
+        # deterministic plan from the episode's exact replayed noise; a lower
+        # bound on any non-anticipative policy's cost. `warm_start` is an optional
+        # {agent_type, extra} heuristic spec used as a local-search start.
+        _check_extra_keys(at, extra, _CLAIRVOYANT_EXTRA_KEYS)
+        from agents.clairvoyant import ClairvoyantAgent
+        _tb = extra.get('time_budget_s', None)
+        _ms = extra.get('max_sweeps', None)          # None ⇒ run BCD to its local optimum
+        return ClairvoyantAgent(
+            use_dp=bool(extra.get('use_dp', True)),
+            warm_start_spec=extra.get('warm_start', None),
+            max_sweeps=(int(_ms) if _ms is not None else None),
+            time_budget_s=(float(_tb) if _tb is not None else None),
+            n_grid=int(extra.get('n_grid', 128)),
+            nf_max=int(extra.get('nf_max', 24)),
+            seed=seed,
+        )
+
+    if at == 'donothing':
+        _check_extra_keys(at, extra, set())
+        from agents.heuristics import DoNothingAgent
+        return DoNothingAgent(env.config)
+
+    if at == 'explore_flip':
+        # Behavior wrapper: base policy + the old warmstart "bit-flip" exploration.
+        # Composes as a mixture mode (flip-wrap a reactive mode, leave do-nothing pure).
+        _check_extra_keys(at, extra, _EXPLORE_FLIP_EXTRA_KEYS)
+        base_spec = extra.get('base')
+        if not base_spec:
+            raise ValueError("agent_type='explore_flip' requires a 'base' policy spec in agent.extra.")
+        from agents.heuristics import FlipWrapperAgent
+        base = _build_agent(AgentConfig.from_dict(base_spec), env, seed)
+        rng = np.random.default_rng(np.random.SeedSequence([int(seed), _FLIP_SEED_SALT]))
+        return FlipWrapperAgent(
+            base, env, rng,
+            p_base=float(extra.get('p_base', 1.0 / 120)),
+            p_high=float(extra.get('p_high', 0.50)),
+            d_ref=float(extra.get('d_ref', 0.5)),
+            act_bias=float(extra.get('act_bias', 0.9)),
+            renovate_bias=float(extra.get('renovate_bias', 0.7)),
+        )
+
+    if at == 'mixture':
+        # Per-episode weighted mixture of behavior policies (warmstart diversification).
+        # Flips are now per-policy: to add acting-bias exploration to a mode, make that
+        # mode an 'explore_flip' wrapping a base policy — and leave the 'donothing' mode
+        # un-wrapped so failure-coverage episodes stay pure.
+        _check_extra_keys(at, extra, _MIXTURE_EXTRA_KEYS)
+        from agents.mixture import MixtureAgent
+        policies = extra.get('policies', [])
+        if not policies:
+            raise ValueError("agent_type='mixture' requires a non-empty 'policies' list in agent.extra.")
+        modes = [(float(p.get('weight', 1.0)), _mixture_policy_factory(p, env, seed))
+                 for p in policies]
+        rng = np.random.default_rng(np.random.SeedSequence([int(seed), _MIXTURE_SEED_SALT]))
+        return MixtureAgent(modes, rng)
 
     raise ValueError(f"Unknown agent_type: {at!r}")
 

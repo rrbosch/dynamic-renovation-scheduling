@@ -43,7 +43,7 @@ from env.mdp import InfraEnv
 
 def _init_worker():
     """Pin BLAS/OpenMP/torch to a single thread inside each collection worker, so
-    the parallelism stays at the PROCESS layer (one layer at a time, CLAUDE.md §8
+    the parallelism stays at the PROCESS layer (one layer at a time, .claude/CLAUDE.md §8
     rule 4). Without this, 16 worker processes each running multi-threaded xgboost
     `predict` (the round>=1 base policy) would oversubscribe the 16 cores."""
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):

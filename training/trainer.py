@@ -35,6 +35,9 @@ def _run_eval_episode(args):
     # Shared-CRN evaluation: keyed only on (base_seed, episode_idx), not the agent.
     env.begin_episode("evaluation", episode_idx, base_seed)
     state = env.reset()
+    # Anticipative baselines pre-solve the episode here from its exact replayed
+    # noise (no-op for ordinary agents). Keyed identically to the env above.
+    agent.on_episode_start("evaluation", episode_idx, base_seed, env, eval_length)
     total_cost = 0.0
     gamma = env.config.gamma
     ep_data = []
@@ -56,6 +59,57 @@ def _run_eval_episode(args):
     # Echo episode_idx back: imap_unordered returns out of order, but the saved
     # index must match the seed used (shared-CRN evaluation).
     return episode_idx, total_cost, ep_data
+
+
+def _assign_mc_returns(ep_transitions, gamma, truncation_mode, agent):
+    """Assign `tr.mc_return` for one episode's transitions (the ADP target source).
+
+    Default: full-horizon discounted return `mc_return_i = cost_i + γ·mc_return_{i+1}`
+    with the bootstrap/none terminal anchor. If the agent sets `n_step > 0`, use an
+    **n-step return that bootstraps off V'** at the post-decision state n steps ahead:
+        mc_return_i = Σ_{k=0..n} γ^k·cost_{i+k} + γ^n·V'(post_{i+n})      (when i+n < L)
+    and the exact full-horizon return for the tail (i+n ≥ L). `n_step` of 0 or ≥ L is
+    **bit-identical** to the full-horizon target. The n-step bootstrap uses the
+    un-baselined `value_fn.predict` (the advantage baseline b(t) is added back inside
+    predict), so it remains a valid cost estimate. Falls back to full-horizon if V' is
+    not yet fitted. See docs/adp_nstep_target_plan.md / docs/adp_value_fn_improvements.md.
+    """
+    L = len(ep_transitions)
+    if L == 0:
+        return
+    if truncation_mode == 'bootstrap' and hasattr(agent, 'value_fn'):
+        boot_state = ep_transitions[-1].post_state.copy()
+        boot_state.t = 0
+        G = agent.value_fn.predict([boot_state])[0]
+    else:
+        G = 0.0
+    full = [0.0] * L
+    for i in range(L - 1, -1, -1):
+        G = ep_transitions[i].cost + gamma * G
+        full[i] = G
+
+    n = int(getattr(agent, 'n_step', 0) or 0)
+    vpost = None
+    if 0 < n < L:
+        try:
+            vpost = agent.value_fn.predict([tr.post_state for tr in ep_transitions])
+        except Exception:
+            vpost = None  # V' not fitted yet → full-horizon fallback
+    if vpost is None:
+        for i in range(L):
+            ep_transitions[i].mc_return = full[i]
+        return
+
+    costs = [tr.cost for tr in ep_transitions]
+    gpow = [gamma ** k for k in range(n + 1)]
+    for i in range(L):
+        if i + n < L:
+            acc = gpow[n] * vpost[i + n]
+            for k in range(n + 1):
+                acc += gpow[k] * costs[i + k]
+            ep_transitions[i].mc_return = acc
+        else:
+            ep_transitions[i].mc_return = full[i]
 
 
 def _run_train_episode(args):
@@ -82,23 +136,8 @@ def _run_train_episode(args):
         # NOT stop at the planning-horizon `done` (= t=T) in that mode; other modes stop at T.
         if done and truncation_mode != 'horizon_rollout':
             break
-    # MC backward pass
-    if truncation_mode == 'bootstrap' and hasattr(agent, 'value_fn'):
-        # Bootstrap the tail as a STATIONARY value (CLAUDE.md §2): treat the terminal
-        # post-decision state as t=0 so V' returns the full ongoing cost-to-go rather
-        # than the end-of-finite-horizon value at t=T. NOTE: on instance_10p this does
-        # not improve cost-to-go ranking (the foresight ceiling is the binding limit,
-        # not the bootstrap anchor) — see docs/i10p_predictability_analysis.md.
-        boot_state = ep_transitions[-1].post_state.copy()
-        boot_state.t = 0
-        G = agent.value_fn.predict([boot_state])[0]
-    elif truncation_mode == 'none':
-        G = 0.0
-    else:
-        G = 0.0
-    for tr in reversed(ep_transitions):
-        G = tr.cost + gamma * G
-        tr.mc_return = G
+    # MC backward pass (full-horizon, or n-step bootstrap if agent.n_step > 0)
+    _assign_mc_returns(ep_transitions, gamma, truncation_mode, agent)
     return ep_transitions
 
 
@@ -145,16 +184,10 @@ class TrainingConfig:
     n_warmstart_states: int = 0             # 0 = disabled; fill buffer with this many
                                             # heuristic transitions (states) before training
     warmstart_agent_config: dict | None = None  # parsed from JSON 'warmstart' key
-    # (b) Warmstart exploration. The warmstart heuristic is ~98% do-nothing, so
-    # V' never sees the *acting* post-states the greedy search must rank. These
-    # keys add d-dependent exploratory flips that bias toward acting (esp.
-    # renovate) when condition is high, giving V' coverage of act-at-high-d
-    # post-states without destroying the on-policy trajectory signal.
-    warmstart_explore_p_base: float = 1.0 / 120  # per-asset flip prob at d=0 (= old 1/T default)
-    warmstart_explore_p_high: float = 0.50       # per-asset flip prob as d -> d_fail
-    warmstart_explore_d_ref: float = 0.5         # d above which flips ramp toward p_high
-    warmstart_explore_act_bias: float = 0.9      # P(flip is an *acting* action vs uniform-feasible)
-    warmstart_explore_renovate_bias: float = 0.7  # within acting flips, P(renovate) (rest split repair/restrict)
+    # Warmstart exploration is no longer a trainer step. To add acting-biased flips
+    # (the old (b) mechanism) wrap the warmstart agent in the 'explore_flip' heuristic
+    # (agents.heuristics.FlipWrapperAgent) via the config — it composes per-policy
+    # (e.g. flip-wrap a reactive mode but not the do-nothing mode of a mixture).
     checkpoint_interval: int = 0                 # 0 = disabled; save checkpoint every N episodes (legacy)
     checkpoint_interval_seconds: float = 1800.0  # 0 = disabled; save checkpoint every N wall-clock seconds
     config_hash: str = ''                        # stable hash of ExperimentConfig (excl. seed)
@@ -364,18 +397,6 @@ class Trainer:
         target = cfg.n_warmstart_states
         print(f"Warmstarting buffer with {type(warmstart_agent).__name__} "
               f"for {target} states...")
-        rng = np.random.default_rng(self.seed)
-        n = env.config.n_assets
-        # (b) d-dependent exploratory flips, biased toward acting (esp. renovate)
-        # at high d. p_flip ramps linearly from p_base (d<=d_ref) to p_high (d=d_fail).
-        d_fail = float(env.config.d_fail)
-        p_base = cfg.warmstart_explore_p_base
-        p_high = cfg.warmstart_explore_p_high
-        d_ref = cfg.warmstart_explore_d_ref
-        act_bias = cfg.warmstart_explore_act_bias
-        ren_bias = cfg.warmstart_explore_renovate_bias
-        _denom = max(1e-9, d_fail - d_ref)
-        ACT_NONE, ACT_REPAIR, ACT_RENOVATE, ACT_RESTRICT = 0, 1, 2, 3
         _ws_t0 = time.monotonic()
         _ws_report_every = max(1, target // 20)  # ~20 progress lines
         _next_report = _ws_report_every
@@ -388,28 +409,6 @@ class Trainer:
             ep_transitions: list[Transition] = []
             for _ in range(env.config.T):
                 action = warmstart_agent.act(state)
-                feas = env.feasible_actions(state)        # (N, 4) bool
-                # Per-asset flip prob ramps with condition d (more exploration
-                # near failure, where the act-vs-wait decision actually matters).
-                ramp = np.clip((state.d - d_ref) / _denom, 0.0, 1.0)
-                p_flip_i = p_base + (p_high - p_base) * ramp
-                for i in range(n):
-                    if rng.random() >= p_flip_i[i]:
-                        continue
-                    feasible_i = np.where(feas[i])[0]
-                    # Prefer an *acting* feasible action (esp. renovate) with prob
-                    # act_bias; otherwise uniform over all feasible actions.
-                    acting = feasible_i[feasible_i != ACT_NONE]
-                    if acting.size > 0 and rng.random() < act_bias:
-                        if ACT_RENOVATE in acting and rng.random() < ren_bias:
-                            action[i] = ACT_RENOVATE
-                        else:
-                            # remaining acting actions (repair/restrict), or
-                            # renovate if it was the only acting option
-                            rest = acting[acting != ACT_RENOVATE]
-                            action[i] = int(rng.choice(rest if rest.size > 0 else acting))
-                    else:
-                        action[i] = int(rng.choice(feasible_i))
                 next_state, cost, done = env.step(state, action)
                 post_state = env.post_decision_state(state, action)
                 tr = Transition(
@@ -535,24 +534,8 @@ class Trainer:
                 if done and cfg.truncation_mode != 'horizon_rollout':
                     break
 
-            # Compute MC returns (backward pass)
-            if (cfg.truncation_mode == 'bootstrap'
-                    and hasattr(self.agent, 'value_fn')
-                    and len(ep_transitions) > 0):
-                # Bootstrap the tail as a STATIONARY value (CLAUDE.md §2): treat the
-                # terminal post-decision state as t=0 so V' returns the full ongoing
-                # cost-to-go, not the end-of-finite-horizon value at t=T.
-                boot_state = ep_transitions[-1].post_state.copy()
-                boot_state.t = 0
-                G = self.agent.value_fn.predict([boot_state])[0]
-            elif cfg.truncation_mode == 'none':
-                G = 0.0
-            else:  # horizon_rollout
-                G = 0.0
-
-            for tr in reversed(ep_transitions):
-                G = tr.cost + env.config.gamma * G
-                tr.mc_return = G
+            # Compute MC returns (full-horizon, or n-step bootstrap if agent.n_step > 0)
+            _assign_mc_returns(ep_transitions, env.config.gamma, cfg.truncation_mode, self.agent)
 
             # Value function update
             if self._is_learner and (ep + 1) % cfg.update_interval == 0 and len(self.buffer) > 0:
@@ -755,6 +738,9 @@ class Trainer:
                 ep_idx = completed + i
                 env.begin_episode("evaluation", ep_idx)
                 state = env.reset()
+                # Anticipative baselines pre-solve the episode here (no-op
+                # otherwise). self.seed == env._base_seed used by begin_episode.
+                agent.on_episode_start("evaluation", ep_idx, self.seed, env, eval_length)
                 total_cost = 0.0
                 gamma = env.config.gamma
                 ep_data = []

@@ -45,6 +45,14 @@ S_t = (d, h, ell, r, n_fail)
 
 `{0=none, 1=repair, 2=renovate, 3=restrict}` — joint action shape `(N,)`.
 
+**Each asset is one bidirectional link** (a physical road = both directed edges).
+Renovation (`eta_ren`) / restriction (`eta_load`) reduce the capacity of *both*
+directed edges of the asset. `NetworkData.asset_edges` is `(N, 2)` (the two directed
+edges per asset); `asset_indices = asset_edges[:, 0]` is the forward edge kept for
+flow lookups. `load_sioux_falls(n_assets, asset_links=None)` selects the first
+`n_assets` of the 38 bidirectional links, or an explicit `asset_links` list (sourced
+from the instance JSON, used to place assets on chosen high-synergy roads).
+
 ### Degradation
 
 ```
