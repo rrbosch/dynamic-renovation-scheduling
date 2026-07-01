@@ -1,27 +1,35 @@
 # Snellius Run Manual
 
 Step-by-step commands for running experiments on Snellius via a **native SLURM job array**
-(`hpc/submit_array.sh`). No HyperQueue: there is no server/worker daemon to keep alive, so the run
-**survives SSH/app disconnects** (a login-node HQ server dying is what killed an earlier run). The
-older HQ-based workflow is preserved in `snellius_manual_old.md`.
+(`hpc/submit_array.sh`, driven by `hpc/submit.sh`). No HyperQueue: there is no server/worker daemon to
+keep alive, so the run **survives SSH/app disconnects** (a login-node HQ server dying is what killed an
+earlier run). The older HQ-based workflow is preserved in `snellius_manual_old.md`.
 
-Partition / sharing / QOS facts (why a 29-task array runs fully concurrent with no node waste) are in
-`hpc/snellius_reference.md`.
+Dispatch is organised around **named per-experiment registries** under `hpc/registries/`. Each registry
+is one batch of runs; the filename sets the SLURM job name:
+
+```
+hpc/registries/<experiment>_<appendix>.json  ->  job rl_<experiment>_<appendix>
+                                             ->  logs hpc/logs/rl_<...>_<jobid>_<task>.{out,err}
+```
+
+Partition / sharing / QOS facts (why a whole array runs concurrent with no node waste) are in
+`hpc/snellius_reference.md`; the registry/job-name convention is in `hpc/registry_conventions.md`.
 
 ---
 
 ## Quick Start
 
-From a login node, with the venv and code already in place:
+From a login node, with the venv and code already in place (current batch = **sf24 0A**, 8 heuristics):
 
 ```bash
 cd ~/Code_v2/
-sbatch --array=1     hpc/submit_array.sh    # smoke test: one ADP config
-sbatch --array=0-28  hpc/submit_array.sh    # full Exp-0B (PPO + 24 ADP + 4 rollout)
-squeue -u $USER                             # watch it run
+bash hpc/submit.sh hpc/registries/sf24_0a.json 2      # smoke test: one config (task 2 = perasset)
+bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7    # full batch -> job rl_sf24_0a
+squeue -u $USER                                        # watch it run (JobName column shows rl_sf24_0a)
 ```
 
-Results land in `results/exp0/<run_name>/`. That's it — no `hq`, no separate worker job, no server.
+Results land in `results/exp0/<run_name>/`. No `hq`, no separate worker job, no server.
 
 ---
 
@@ -44,9 +52,10 @@ activate it just to submit.)
 
 ---
 
-## 2. Sync code, configs, and registry from your laptop
+## 2. Sync code, configs, and registries from your laptop
 
-Run on your **laptop**. `rsync` is preferred (skips `results/` and caches):
+Run on your **laptop**. `rsync` skips `results/` and caches. **`env/` is now tracked and must be
+synced** (the bidirectional asset model lives there):
 
 ```bash
 rsync -av --delete \
@@ -55,96 +64,98 @@ rsync -av --delete \
   <username>@snellius.surf.nl:~/Code_v2/
 ```
 
-Make sure these in particular are current: all `configs/i10p_*.json` (their `run_name` is `exp0/…`),
-`hpc/registry.json`, `hpc/submit_array.sh`, and any code you changed.
+Make sure these are current: the `configs/` for the batch you're running, `instances/` (e.g.
+`instance_sf24.json`), `hpc/registries/`, `hpc/submit.sh`, `hpc/submit_array.sh`, and any changed code.
+After a big code change (e.g. the bidirectional model), run the **login-node canary** in §3 before
+submitting.
 
 ---
 
-## 3. The registry and the index map
+## 3. Registries, the index map, and a build canary
 
-`hpc/submit_array.sh` runs one registry entry per array element via
-`python hpc/run_task.py --expe_id=$SLURM_ARRAY_TASK_ID`. The index → config mapping
-(`hpc/registry.json`, 32 entries):
+`hpc/submit_array.sh <registry.json>` runs one registry entry per array element via
+`python hpc/run_task.py --expe_id=$SLURM_ARRAY_TASK_ID --registry <registry.json>`. Each registry is a
+flat JSON list; the array index is the 0-based position in that list.
 
-| Index | Configs |
-|---|---|
-| `0` | `i10p_ppo_curriculum` |
-| `1-24` | the 24 ADP grid configs |
-| `25-28` | the 4 MC-rollout configs |
-| `29-31` | optuna 0A heuristics — **already done, do NOT re-run** |
-
-Count / inspect:
+Inspect / dry-run a registry (no compute):
 
 ```bash
-python3 -c "import json; r=json.load(open('hpc/registry.json')); print(len(r),'entries'); [print(i, r[i]['config']) for i in (0,24,25,28)]"
+python3 -c "import json; r=json.load(open('hpc/registries/sf24_0a.json')); print(len(r),'entries'); [print(i,e['config']) for i,e in enumerate(r)]"
+python hpc/run_task.py --registry hpc/registries/sf24_0a.json --expe_id 2 --dry-run   # prints the resolved config, no run
 ```
 
-To regenerate the registry (single replication for Exp 0):
+**Login-node build canary** (catches a stale/partial upload before you burn an array):
 
 ```bash
 source ~/.local/venv/bin/activate
-python hpc/generate_registry.py --configs "configs/i10p_*.json"      # add --seeds 0 1 2 3 4 for Exp 1+
+python -c "from experiments.configs import ExperimentConfig, build_experiment as b; \
+b(ExperimentConfig.from_file('configs/sf24_optuna_perasset.json')); print('build OK')"
+```
+
+Create a new named registry for a batch (prints the exact submit line):
+
+```bash
+python hpc/generate_registry.py --configs "configs/sf24_optuna_*.json" \
+    --output hpc/registries/sf24_0a.json          # add --seeds 0 1 2 3 4 for Exp 1+
 ```
 
 ---
 
 ## 4. Submit the array
 
-The `#SBATCH` defaults are baked into `hpc/submit_array.sh`
-(`--array=0-28`, `--cpus-per-task=16`, `--time=28:00:00`, `--partition=rome`; no `--mem-per-cpu`).
-16 cores = the Snellius minimum shareable slot (1/8 node), so it's the smallest billed unit anyway —
-`n_workers=16` uses it fully. (See `hpc/registry_conventions.md`.)
-A CLI `--array` overrides the directive, so:
+Use the wrapper — it derives the job name from the registry filename and passes the registry through:
 
 ```bash
-# Smoke test ONE config first (confirm it starts fresh + writes results/exp0/...):
-sbatch --array=1 hpc/submit_array.sh
+# Smoke ONE config first (confirm it starts + writes results/exp0/...):
+bash hpc/submit.sh hpc/registries/sf24_0a.json 2
 
-# Full run:
-sbatch --array=0-28 hpc/submit_array.sh
+# Full batch (job name rl_sf24_0a):
+bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7
 
-# Any subset is fine, e.g. just the rollout configs:
-sbatch --array=25-28 hpc/submit_array.sh
+# Any subset works, e.g. a few indices:
+bash hpc/submit.sh hpc/registries/sf24_0a.json 1,3,5
 ```
 
-`sbatch` prints a `<jobid>`. All 29 elements run concurrently (QOS allows up to 128/user; single-node
-jobs share nodes, so no whole-node waste). **Walltime is 28h** — longer than the 24h training
-`time_budget` so the final evaluation (`experiments/run.py` → `trainer.evaluate(save_episodes=True)`)
-completes and writes `eval_episodes.csv`. A run that is cut off *before* that final eval produces no
-eval file.
+Equivalent explicit form (set the name yourself):
+`sbatch --job-name=rl_sf24_0a --array=0-7 hpc/submit_array.sh hpc/registries/sf24_0a.json`.
+
+`sbatch` prints a `<jobid>`. All elements run concurrently (QOS allows up to 128/user; single-node jobs
+share nodes, so no whole-node waste). `#SBATCH` defaults in `submit_array.sh`: `--cpus-per-task=16`,
+`--time=28:00:00`, `--partition=rome`, no `--mem-per-cpu` (16 cores = the min shareable/billed slot;
+`n_workers=16` uses it fully — see `hpc/registry_conventions.md`). **Walltime is 28h** — longer than the
+24h training `time_budget` so the final evaluation completes and writes `eval_episodes.csv`; a run cut
+off before that produces no eval file. (Optuna 0A is single-threaded — 16 cores is billed regardless,
+so no change needed.)
 
 ---
 
 ## 5. Monitor
 
 ```bash
-squeue -u $USER                                              # queued / running array elements
-sacct -j <jobid> --format=JobID,State,Elapsed,MaxRSS%12     # per-element state (RUNNING/COMPLETED/TIMEOUT/FAILED)
-tail -f "hpc/logs/slurm_<jobid>_1.out"                       # live log for array task 1
-grep -l "Resuming from checkpoint" hpc/logs/slurm_<jobid>_*.out   # which tasks resumed vs started fresh
+squeue -u $USER --format="%.18i %.20j %.8T %.10M"           # JobName column shows rl_sf24_0a etc.
+sacct -j <jobid> --format=JobID,JobName%20,State,Elapsed,MaxRSS%12
+tail -f "hpc/logs/rl_sf24_0a_<jobid>_2.out"                 # live log for task 2
+grep -l "Resuming from checkpoint" hpc/logs/rl_sf24_0a_<jobid>_*.out   # which tasks resumed vs fresh
 ```
 
-Per-task stdout/stderr: `hpc/logs/slurm_%A_%a.out` / `.err` (`%A`=array job id, `%a`=task index).
-Per-run output: `results/exp0/<run_name>/` (config, checkpoints, `training_log.csv`,
+Per-task stdout/stderr: `hpc/logs/<jobname>_%A_%a.out` / `.err` (`%x`=job name, `%A`=array job id,
+`%a`=task index). Per-run output: `results/exp0/<run_name>/` (config, checkpoints, `training_log.csv`,
 `eval_episodes.csv`).
 
-**Disconnect test:** after submitting, close your session and reconnect — `squeue -u $USER` still
-shows the array. That's the whole point of dropping the HQ server.
+**Disconnect test:** after submitting, close your session and reconnect — `squeue -u $USER` still shows
+the array. That's the whole point of dropping the HQ server.
 
 ---
 
 ## 6. Resume after a timeout or partial failure
 
-Runs checkpoint periodically (default every 30 min) and auto-resume on the **same config**: resubmit
-the array and each incomplete run continues from its latest checkpoint (`auto_resume=True`, keyed on
-`config_hash`). To avoid re-running ones that already finished, resubmit only the unfinished indices:
+Runs checkpoint periodically (default every 30 min) and auto-resume on the **same config** (keyed on
+`config_hash`): resubmit the batch and each incomplete run continues from its latest checkpoint. To
+skip finished ones, resubmit only the unfinished indices:
 
 ```bash
-# Identify finished runs (have a complete checkpoint / eval_episodes.csv):
-ls results/exp0/*/eval_episodes.csv 2>/dev/null
-
-# Resubmit only the indices that didn't finish, e.g.:
-sbatch --array=3,7,12-14 hpc/submit_array.sh
+ls results/exp0/*/eval_episodes.csv 2>/dev/null            # finished runs
+bash hpc/submit.sh hpc/registries/sf24_0a.json 3,5-7       # resubmit only what's left
 ```
 
 No work is lost — resumed runs pick up their episode counter and elapsed time from the checkpoint.
@@ -159,7 +170,8 @@ On your **laptop**:
 rsync -av <username>@snellius.surf.nl:~/Code_v2/results/exp0/ "results/exp0/"
 ```
 
-Then analyze locally (paired-CRN comparison vs the tuned reactive heuristic baseline).
+Then analyze locally (paired-CRN comparison vs the tuned reactive/per-asset heuristic and the
+clairvoyant lower bound).
 
 ---
 
@@ -168,10 +180,12 @@ Then analyze locally (paired-CRN comparison vs the tuned reactive heuristic base
 | Action | Command |
 |---|---|
 | Sync code up (laptop) | `rsync -av --exclude results/ … snellius:~/Code_v2/` |
-| Count registry entries | `python3 -c "import json; print(len(json.load(open('hpc/registry.json'))))"` |
-| Smoke test one config | `sbatch --array=1 hpc/submit_array.sh` |
-| Submit full 0B | `sbatch --array=0-28 hpc/submit_array.sh` |
-| Watch queue | `squeue -u $USER` |
-| Per-element state | `sacct -j <jobid> --format=JobID,State,Elapsed` |
+| Inspect a registry | `python3 -c "import json;print(len(json.load(open('hpc/registries/sf24_0a.json'))))"` |
+| Dry-run an entry | `python hpc/run_task.py --registry hpc/registries/sf24_0a.json --expe_id 0 --dry-run` |
+| Build canary | `python -c "from experiments.configs import ExperimentConfig,build_experiment as b; b(ExperimentConfig.from_file('configs/sf24_optuna_perasset.json'))"` |
+| Smoke one config | `bash hpc/submit.sh hpc/registries/sf24_0a.json 2` |
+| Submit a batch | `bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7` |
+| Watch queue | `squeue -u $USER --format="%.18i %.20j %.8T %.10M"` |
+| Per-element state | `sacct -j <jobid> --format=JobID,JobName%20,State,Elapsed` |
 | Cancel | `scancel <jobid>` (or `scancel -u $USER`) |
 | Pull results (laptop) | `rsync -av snellius:~/Code_v2/results/exp0/ results/exp0/` |
