@@ -1,296 +1,41 @@
 [
   {
-    "config": "configs/i10p_ppo_curriculum.json",
+    "config": "configs/sf24_optuna_reactive.json",
     "run_name": null,
     "seed": null
   },
   {
-    "config": "configs/i10p_adp_normal_empty_fifo_nn.json",
+    "config": "configs/sf24_optuna_paced.json",
     "run_name": null,
     "seed": null
   },
   {
-    "config": "configs/i10p_adp_normal_empty_fifo_xgb.json",
+    "config": "configs/sf24_optuna_perasset.json",
     "run_name": null,
     "seed": null
   },
   {
-    "config": "configs/i10p_adp_normal_empty_knockout_nn.json",
+    "config": "configs/sf24_optuna_leadtime.json",
     "run_name": null,
     "seed": null
   },
   {
-    "config": "configs/i10p_adp_normal_empty_knockout_xgb.json",
+    "config": "configs/sf24_optuna_netconcurrency.json",
     "run_name": null,
     "seed": null
   },
   {
-    "config": "configs/i10p_adp_normal_empty_lowesterror_nn.json",
+    "config": "configs/sf24_optuna_holding.json",
     "run_name": null,
     "seed": null
   },
   {
-    "config": "configs/i10p_adp_normal_empty_lowesterror_xgb.json",
+    "config": "configs/sf24_optuna_valuedensity.json",
     "run_name": null,
     "seed": null
   },
   {
-    "config": "configs/i10p_adp_normal_policy_fifo_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_normal_policy_fifo_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_normal_policy_knockout_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_normal_policy_knockout_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_normal_policy_lowesterror_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_normal_policy_lowesterror_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_empty_fifo_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_empty_fifo_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_empty_knockout_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_empty_knockout_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_empty_lowesterror_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_empty_lowesterror_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_policy_fifo_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_policy_fifo_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_policy_knockout_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_policy_knockout_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_policy_lowesterror_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp_seq_policy_lowesterror_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_rollout_empty.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_rollout_policy.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_seq_rollout_empty.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_seq_rollout_policy.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_optuna_paced.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_optuna_perasset.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_optuna_reactive.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_optuna_holding.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_optuna_leadtime.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_optuna_netconcurrency.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_optuna_valuedensity.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_optuna_worstfirst.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_dcl_seq_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_dcl_seq_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_dcl_independent_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_dcl_independent_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_dcl_localsearch_xgb.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_dcl_localsearch_nn.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_dcl_seq_xgb_wilcoxon.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_dcl_seq_xgb_sh.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_dcl_seq_xgb_vfa.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_dcl_seq_xgb_vfa_sh.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_xgb_aboff_nsfull.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_xgb_aboff_ns4.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_xgb_abon_nsfull.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_xgb_abon_ns4.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_nn_aboff_nsfull.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_nn_aboff_ns4.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_nn_abon_nsfull.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_nn_abon_ns4.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_ctrl_emptyinit.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_ctrl_seq.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_ctrl_lowesterror.json",
-    "run_name": null,
-    "seed": null
-  },
-  {
-    "config": "configs/i10p_adp2_ctrl_noflip.json",
+    "config": "configs/sf24_optuna_worstfirst.json",
     "run_name": null,
     "seed": null
   }
