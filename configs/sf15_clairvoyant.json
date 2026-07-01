@@ -2,8 +2,8 @@
   "network": "sioux_falls",
   "tap_backend": "fast",
   "seed": 42,
-  "run_name": "cal/sf24_clairvoyant",
-  "instance": "instances/instance_sf24.json",
+  "run_name": "cal/sf15_clairvoyant",
+  "instance": "instances/instance_sf15.json",
   "training": {
     "n_episodes": 1,
     "n_eval_episodes": 50,

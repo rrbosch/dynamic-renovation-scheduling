@@ -7,17 +7,17 @@
 #
 # Usage:
 #   bash hpc/submit.sh <registry.json> <array-spec>
-#   e.g.  bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7      # job rl_sf24_0a, tasks 0..7
-#         bash hpc/submit.sh hpc/registries/sf24_0a.json 2        # single smoke task
+#   e.g.  bash hpc/submit.sh hpc/registries/sf15_0a.json 0-7      # job rl_sf15_0a, tasks 0..7
+#         bash hpc/submit.sh hpc/registries/sf15_0a.json 2        # single smoke task
 #
 # (Equivalent explicit form:
-#    sbatch --job-name=rl_sf24_0a --array=0-7 hpc/submit_array.sh hpc/registries/sf24_0a.json )
+#    sbatch --job-name=rl_sf15_0a --array=0-7 hpc/submit_array.sh hpc/registries/sf15_0a.json )
 #
 # The HQ worker-spawn script that used to live here is deprecated — the SLURM job array
 # (submit_array.sh) needs no login-node daemon. See git history for the old HyperQueue path.
 set -e
 
-reg="${1:?usage: bash hpc/submit.sh <registry.json> <array-spec>   e.g. hpc/registries/sf24_0a.json 0-7}"
+reg="${1:?usage: bash hpc/submit.sh <registry.json> <array-spec>   e.g. hpc/registries/sf15_0a.json 0-7}"
 array="${2:?missing array spec, e.g. 0-7 or 2 or 1,5,9}"
 
 if [[ ! -f "$reg" ]]; then

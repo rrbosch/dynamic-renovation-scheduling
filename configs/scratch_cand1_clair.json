@@ -1,0 +1,19 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "scratch/cand1_clair",
+  "instance": "scratch/instance_cand1.json",
+  "training": {
+    "n_episodes": 1,
+    "n_eval_episodes": 8,
+    "n_workers": 14
+  },
+  "agent": {
+    "agent_type": "clairvoyant",
+    "extra": {
+      "use_dp": true,
+      "time_budget_s": 86400
+    }
+  }
+}

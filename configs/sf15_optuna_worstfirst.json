@@ -2,8 +2,8 @@
   "network": "sioux_falls",
   "tap_backend": "fast",
   "seed": 42,
-  "run_name": "exp0/sf24_optuna_leadtime",
-  "instance": "instances/instance_sf24.json",
+  "run_name": "exp0/sf15_optuna_worstfirst",
+  "instance": "instances/instance_sf15.json",
   "training": {
     "time_budget": 86400,
     "n_eval_episodes": 50,
@@ -13,7 +13,7 @@
   "agent": {
     "agent_type": "optuna_heuristic",
     "extra": {
-      "heuristic_type": "leadtime",
+      "heuristic_type": "worstfirst",
       "n_tuning_episodes": 100
     }
   }

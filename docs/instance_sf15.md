@@ -1,14 +1,14 @@
-# instance_sf24 — congestion-synergy calibration instance
+# instance_sf15 — congestion-synergy calibration instance
 
-`instances/instance_sf24.json` is the calibration instance we test on. It is engineered so that
+`instances/instance_sf15.json` is the calibration instance we test on. It is engineered so that
 **anticipation matters through avoiding clusters of road congestion**: assets are placed on roads
 whose *simultaneous* renovation is catastrophically congesting, and they are timed so a myopic
 policy is forced to bunch those closures while a foresighted policy staggers them. This document
 explains the selection reasoning (why the assets are where they are) and gives the instance spec
 and results.
 
-- **Instance:** `instances/instance_sf24.json` (n=15)
-- **Configs:** `configs/sf24_clairvoyant.json`, `configs/sf24_reactive.json`
+- **Instance:** `instances/instance_sf15.json` (n=15)
+- **Configs:** `configs/sf15_clairvoyant.json`, `configs/sf15_reactive.json`
 - **Builder (reproducible):** `experiments/build_synergy_instance.py`
 - **Baseline model:** each asset is one **bidirectional link** (both directions of a road; see
   `.claude/rules/env-internals.md`).
@@ -49,7 +49,7 @@ Both selections renovate the same amount (≈equal clairvoyant cost and workload
 set is only *additively* congesting when bunched, so staggering barely helps → the reactive is
 cheap → small gap. **Putting assets on the busiest roads — the intuitive choice — minimizes the
 value of anticipation; high-synergy cuts maximize it** (even low-volume ones like the node-1 corner,
-V/C 0.14–0.20). See `docs/sf24_v2c_map.png` for the V²/C map (green=low, red=high).
+V/C 0.14–0.20). See `docs/sf15_v2c_map.png` for the V²/C map (green=low, red=high).
 
 ## 3. The volume-biased synergy blend (why the final selection)
 
@@ -84,7 +84,7 @@ defensible (busiest) roads. Confirmed by full 50-ep eval:
 | **λ=0.5 (this instance)** | 1824 M | 7631 M | **76.1 %** | 0.53 |
 | λ=1 (pure V²/C) | 1718 M | 2347 M | 26.8 % | 0.59 |
 
-`docs/sf24_selected_links.png` shows the 15 chosen links coloured by d_init (failure order).
+`docs/sf15_selected_links.png` shows the 15 chosen links coloured by d_init (failure order).
 
 ## 4. Instance construction & spec
 
@@ -97,7 +97,7 @@ Built by `experiments/build_synergy_instance.py`:
    so every asset has > 80 % chance of failing in-horizon (Gamma first-passage). Homogeneous
    degradation (`e_fail_cv=0`, `alpha0_sigma=0`) ⇒ sorted-d_init order = failure order, so
    *fails-together = congestion-coupled* — and the failure timeline is a smooth continuous spread
-   (no visible cohorts; `docs/sf24_degradation.png`).
+   (no visible cohorts; `docs/sf15_degradation.png`).
 5. **Auto-calibrated lengths:** binary search on renovation duration so the renovate-at-failure
    *workload* avg-sim hits `--target-avgsim` (3.5).
 
@@ -130,9 +130,9 @@ frontier (e.g. tcf≈0.5 → gap ~57 %, travel ~60 %).
 
 ```bash
 python experiments/build_synergy_instance.py --n 15 --seed 0 --target-avgsim 3.5 \
-    --v2c-bias 0.5 --output instances/instance_sf24.json
-python experiments/run.py --config configs/sf24_clairvoyant.json      # 50-ep clairvoyant
-python experiments/run.py --config configs/sf24_reactive.json         # tune + 50-ep reactive
+    --v2c-bias 0.5 --output instances/instance_sf15.json
+python experiments/run.py --config configs/sf15_clairvoyant.json      # 50-ep clairvoyant
+python experiments/run.py --config configs/sf15_reactive.json         # tune + 50-ep reactive
 ```
 
 The contrast selections are regenerable on demand: `--v2c-bias 0` (pure synergy) or

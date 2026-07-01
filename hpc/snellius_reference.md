@@ -118,7 +118,7 @@ billing increment. HQ remains fine **if** the server is moved off the login node
 **Implemented:** `hpc/submit_array.sh` is the native-array path (no HQ server/worker). It runs one
 **named-registry** entry per task via `run_task.py --expe_id=$SLURM_ARRAY_TASK_ID --registry <file>`;
 dispatch a batch with `bash hpc/submit.sh hpc/registries/<name>.json <array>` (derives job name
-`rl_<name>`, e.g. `bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7`). Only `hq_task.sh` remains as
+`rl_<name>`, e.g. `bash hpc/submit.sh hpc/registries/sf15_0a.json 0-7`). Only `hq_task.sh` remains as
 the deprecated HQ fallback — `submit.sh` is now the wrapper. Full workflow: `hpc/snellius_manual.md`.
 
 ---

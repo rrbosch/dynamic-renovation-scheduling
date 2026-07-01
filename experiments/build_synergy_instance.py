@@ -18,7 +18,7 @@ renovations. Fully reproducible from the CLI (seeded; no post-hoc JSON edits).
 
 Example:
     python experiments/build_synergy_instance.py --n 15 --seed 0 \
-        --output instances/instance_sf24_synergy_cont.json
+        --output instances/instance_sf15_synergy_cont.json
 """
 from __future__ import annotations
 

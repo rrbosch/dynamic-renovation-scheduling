@@ -1,0 +1,37 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "scratch/cand1_reactive",
+  "instance": "scratch/instance_cand1.json",
+  "training": {
+    "time_budget": 420,
+    "n_eval_episodes": 8,
+    "early_stopping_seconds": 420,
+    "n_workers": 14
+  },
+  "agent": {
+    "agent_type": "optuna_heuristic",
+    "extra": {
+      "heuristic_type": "reactive",
+      "n_tuning_episodes": 30,
+      "param_space": {
+        "threshold": {
+          "type": "float",
+          "low": 0.0,
+          "high": 1.0
+        },
+        "repair_threshold": {
+          "type": "float",
+          "low": 0.0,
+          "high": 1.1
+        },
+        "restrict_threshold": {
+          "type": "float",
+          "low": 0.0,
+          "high": 1.1
+        }
+      }
+    }
+  }
+}

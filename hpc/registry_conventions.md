@@ -71,8 +71,8 @@ several can be pre-created and submitted independently. The filename drives the 
 hpc/registries/<experiment>_<appendix>.json   ->   job name  rl_<experiment>_<appendix>
                                               ->   logs       hpc/logs/rl_<...>_<jobid>_<task>.{out,err}
 ```
-`<appendix>` is optional (e.g. `v2`, `sf15`). Examples: `sf24_0a.json → rl_sf24_0a`,
-`sf24_0b_adp_v2.json → rl_sf24_0b_adp_v2`. The thin wrapper `hpc/submit.sh <registry> <array>`
+`<appendix>` is optional (e.g. `v2`, `sf15`). Examples: `sf15_0a.json → rl_sf15_0a`,
+`sf15_0b_adp_v2.json → rl_sf15_0b_adp_v2`. The thin wrapper `hpc/submit.sh <registry> <array>`
 derives the name; `submit_array.sh` takes the registry as its first argument and passes it to
 `run_task.py --registry`. Archived registries live under `hpc/registries/_archive/`.
 
@@ -81,15 +81,15 @@ derives the name; `submit_array.sh` takes the registry as its first argument and
 **Exp 0** — 1 replication per config. Build a named registry per batch, then submit it:
 
 ```bash
-# 0A heuristics on sf24 (8 optuna configs), single-threaded (n_workers=1):
-python hpc/generate_registry.py --configs configs/sf24_optuna_*.json \
-    --output hpc/registries/sf24_0a.json
-bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7        # job rl_sf24_0a
+# 0A heuristics on sf15 (8 optuna configs), single-threaded (n_workers=1):
+python hpc/generate_registry.py --configs configs/sf15_optuna_*.json \
+    --output hpc/registries/sf15_0a.json
+bash hpc/submit.sh hpc/registries/sf15_0a.json 0-7        # job rl_sf15_0a
 
-# 0B learners on sf24 (regenerated after 0A):
-python hpc/generate_registry.py --configs configs/sf24_adp2_*.json configs/sf24_dcl_*.json \
-    configs/sf24_rollout_*.json configs/sf24_ppo_*.json --output hpc/registries/sf24_0b.json
-bash hpc/submit.sh hpc/registries/sf24_0b.json 0-<N-1>    # job rl_sf24_0b
+# 0B learners on sf15 (regenerated after 0A):
+python hpc/generate_registry.py --configs configs/sf15_adp2_*.json configs/sf15_dcl_*.json \
+    configs/sf15_rollout_*.json configs/sf15_ppo_*.json --output hpc/registries/sf15_0b.json
+bash hpc/submit.sh hpc/registries/sf15_0b.json 0-<N-1>    # job rl_sf15_0b
 ```
 (`generate_registry.py` prints the exact `bash hpc/submit.sh ... 0-<N-1>` line for the batch it wrote.
 Keep Optuna configs on their own registry — they run single-threaded, `--cpus-per-task=1` is enough,

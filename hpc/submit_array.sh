@@ -11,11 +11,11 @@
 #
 # Usage (run from the login node):
 #   cd ~/Code_v2/
-#   bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7          # recommended: auto job name rl_sf24_0a
+#   bash hpc/submit.sh hpc/registries/sf15_0a.json 0-7          # recommended: auto job name rl_sf15_0a
 #   # or drive sbatch directly (set the name yourself):
-#   sbatch --job-name=rl_sf24_0a --array=0-7 hpc/submit_array.sh hpc/registries/sf24_0a.json
+#   sbatch --job-name=rl_sf15_0a --array=0-7 hpc/submit_array.sh hpc/registries/sf15_0a.json
 #   # single smoke test:
-#   sbatch --job-name=rl_sf24_0a --array=2  hpc/submit_array.sh hpc/registries/sf24_0a.json
+#   sbatch --job-name=rl_sf15_0a --array=2  hpc/submit_array.sh hpc/registries/sf15_0a.json
 #
 # Why an array works here (see hpc/snellius_reference.md): single-node jobs SHARE nodes on
 # Snellius (--cpus-per-task=16 packs up to 8 tasks/node), and QOS allows up to 128 concurrent

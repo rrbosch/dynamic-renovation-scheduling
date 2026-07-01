@@ -10,8 +10,8 @@ each with `bash hpc/submit.sh <registry> <array>` (job name derived from the fil
 Usage examples
 --------------
 # A named batch registry (single run per config, seed from JSON):
-python hpc/generate_registry.py --configs configs/sf24_optuna_*.json \
-    --output hpc/registries/sf24_0a.json
+python hpc/generate_registry.py --configs configs/sf15_optuna_*.json \
+    --output hpc/registries/sf15_0a.json
 
 # Specific configs, 5 seeds each:
 python hpc/generate_registry.py --configs configs/exp1_*.json --seeds 0 1 2 3 4 \

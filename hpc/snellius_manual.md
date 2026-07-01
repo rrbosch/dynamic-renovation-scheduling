@@ -20,13 +20,13 @@ Partition / sharing / QOS facts (why a whole array runs concurrent with no node 
 
 ## Quick Start
 
-From a login node, with the venv and code already in place (current batch = **sf24 0A**, 8 heuristics):
+From a login node, with the venv and code already in place (current batch = **sf15 0A**, 8 heuristics):
 
 ```bash
 cd ~/Code_v2/
-bash hpc/submit.sh hpc/registries/sf24_0a.json 2      # smoke test: one config (task 2 = perasset)
-bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7    # full batch -> job rl_sf24_0a
-squeue -u $USER                                        # watch it run (JobName column shows rl_sf24_0a)
+bash hpc/submit.sh hpc/registries/sf15_0a.json 2      # smoke test: one config (task 2 = perasset)
+bash hpc/submit.sh hpc/registries/sf15_0a.json 0-7    # full batch -> job rl_sf15_0a
+squeue -u $USER                                        # watch it run (JobName column shows rl_sf15_0a)
 ```
 
 Results land in `results/exp0/<run_name>/`. No `hq`, no separate worker job, no server.
@@ -65,7 +65,7 @@ rsync -av --delete \
 ```
 
 Make sure these are current: the `configs/` for the batch you're running, `instances/` (e.g.
-`instance_sf24.json`), `hpc/registries/`, `hpc/submit.sh`, `hpc/submit_array.sh`, and any changed code.
+`instance_sf15.json`), `hpc/registries/`, `hpc/submit.sh`, `hpc/submit_array.sh`, and any changed code.
 After a big code change (e.g. the bidirectional model), run the **login-node canary** in §3 before
 submitting.
 
@@ -80,8 +80,8 @@ flat JSON list; the array index is the 0-based position in that list.
 Inspect / dry-run a registry (no compute):
 
 ```bash
-python3 -c "import json; r=json.load(open('hpc/registries/sf24_0a.json')); print(len(r),'entries'); [print(i,e['config']) for i,e in enumerate(r)]"
-python hpc/run_task.py --registry hpc/registries/sf24_0a.json --expe_id 2 --dry-run   # prints the resolved config, no run
+python3 -c "import json; r=json.load(open('hpc/registries/sf15_0a.json')); print(len(r),'entries'); [print(i,e['config']) for i,e in enumerate(r)]"
+python hpc/run_task.py --registry hpc/registries/sf15_0a.json --expe_id 2 --dry-run   # prints the resolved config, no run
 ```
 
 **Login-node build canary** (catches a stale/partial upload before you burn an array):
@@ -89,14 +89,14 @@ python hpc/run_task.py --registry hpc/registries/sf24_0a.json --expe_id 2 --dry-
 ```bash
 source ~/.local/venv/bin/activate
 python -c "from experiments.configs import ExperimentConfig, build_experiment as b; \
-b(ExperimentConfig.from_file('configs/sf24_optuna_perasset.json')); print('build OK')"
+b(ExperimentConfig.from_file('configs/sf15_optuna_perasset.json')); print('build OK')"
 ```
 
 Create a new named registry for a batch (prints the exact submit line):
 
 ```bash
-python hpc/generate_registry.py --configs "configs/sf24_optuna_*.json" \
-    --output hpc/registries/sf24_0a.json          # add --seeds 0 1 2 3 4 for Exp 1+
+python hpc/generate_registry.py --configs "configs/sf15_optuna_*.json" \
+    --output hpc/registries/sf15_0a.json          # add --seeds 0 1 2 3 4 for Exp 1+
 ```
 
 ---
@@ -107,17 +107,17 @@ Use the wrapper — it derives the job name from the registry filename and passe
 
 ```bash
 # Smoke ONE config first (confirm it starts + writes results/exp0/...):
-bash hpc/submit.sh hpc/registries/sf24_0a.json 2
+bash hpc/submit.sh hpc/registries/sf15_0a.json 2
 
-# Full batch (job name rl_sf24_0a):
-bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7
+# Full batch (job name rl_sf15_0a):
+bash hpc/submit.sh hpc/registries/sf15_0a.json 0-7
 
 # Any subset works, e.g. a few indices:
-bash hpc/submit.sh hpc/registries/sf24_0a.json 1,3,5
+bash hpc/submit.sh hpc/registries/sf15_0a.json 1,3,5
 ```
 
 Equivalent explicit form (set the name yourself):
-`sbatch --job-name=rl_sf24_0a --array=0-7 hpc/submit_array.sh hpc/registries/sf24_0a.json`.
+`sbatch --job-name=rl_sf15_0a --array=0-7 hpc/submit_array.sh hpc/registries/sf15_0a.json`.
 
 `sbatch` prints a `<jobid>`. All elements run concurrently (QOS allows up to 128/user; single-node jobs
 share nodes, so no whole-node waste). `#SBATCH` defaults in `submit_array.sh`: `--cpus-per-task=16`,
@@ -132,10 +132,10 @@ so no change needed.)
 ## 5. Monitor
 
 ```bash
-squeue -u $USER --format="%.18i %.20j %.8T %.10M"           # JobName column shows rl_sf24_0a etc.
+squeue -u $USER --format="%.18i %.20j %.8T %.10M"           # JobName column shows rl_sf15_0a etc.
 sacct -j <jobid> --format=JobID,JobName%20,State,Elapsed,MaxRSS%12
-tail -f "hpc/logs/rl_sf24_0a_<jobid>_2.out"                 # live log for task 2
-grep -l "Resuming from checkpoint" hpc/logs/rl_sf24_0a_<jobid>_*.out   # which tasks resumed vs fresh
+tail -f "hpc/logs/rl_sf15_0a_<jobid>_2.out"                 # live log for task 2
+grep -l "Resuming from checkpoint" hpc/logs/rl_sf15_0a_<jobid>_*.out   # which tasks resumed vs fresh
 ```
 
 Per-task stdout/stderr: `hpc/logs/<jobname>_%A_%a.out` / `.err` (`%x`=job name, `%A`=array job id,
@@ -155,7 +155,7 @@ skip finished ones, resubmit only the unfinished indices:
 
 ```bash
 ls results/exp0/*/eval_episodes.csv 2>/dev/null            # finished runs
-bash hpc/submit.sh hpc/registries/sf24_0a.json 3,5-7       # resubmit only what's left
+bash hpc/submit.sh hpc/registries/sf15_0a.json 3,5-7       # resubmit only what's left
 ```
 
 No work is lost — resumed runs pick up their episode counter and elapsed time from the checkpoint.
@@ -180,11 +180,11 @@ clairvoyant lower bound).
 | Action | Command |
 |---|---|
 | Sync code up (laptop) | `rsync -av --exclude results/ … snellius:~/Code_v2/` |
-| Inspect a registry | `python3 -c "import json;print(len(json.load(open('hpc/registries/sf24_0a.json'))))"` |
-| Dry-run an entry | `python hpc/run_task.py --registry hpc/registries/sf24_0a.json --expe_id 0 --dry-run` |
-| Build canary | `python -c "from experiments.configs import ExperimentConfig,build_experiment as b; b(ExperimentConfig.from_file('configs/sf24_optuna_perasset.json'))"` |
-| Smoke one config | `bash hpc/submit.sh hpc/registries/sf24_0a.json 2` |
-| Submit a batch | `bash hpc/submit.sh hpc/registries/sf24_0a.json 0-7` |
+| Inspect a registry | `python3 -c "import json;print(len(json.load(open('hpc/registries/sf15_0a.json'))))"` |
+| Dry-run an entry | `python hpc/run_task.py --registry hpc/registries/sf15_0a.json --expe_id 0 --dry-run` |
+| Build canary | `python -c "from experiments.configs import ExperimentConfig,build_experiment as b; b(ExperimentConfig.from_file('configs/sf15_optuna_perasset.json'))"` |
+| Smoke one config | `bash hpc/submit.sh hpc/registries/sf15_0a.json 2` |
+| Submit a batch | `bash hpc/submit.sh hpc/registries/sf15_0a.json 0-7` |
 | Watch queue | `squeue -u $USER --format="%.18i %.20j %.8T %.10M"` |
 | Per-element state | `sacct -j <jobid> --format=JobID,JobName%20,State,Elapsed` |
 | Cancel | `scancel <jobid>` (or `scancel -u $USER`) |
