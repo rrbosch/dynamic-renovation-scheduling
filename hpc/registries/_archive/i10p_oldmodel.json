@@ -183,5 +183,115 @@
     "config": "configs/i10p_optuna_worstfirst.json",
     "run_name": null,
     "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_independent_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_independent_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_localsearch_xgb.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_localsearch_nn.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_xgb_wilcoxon.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_xgb_sh.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_xgb_vfa.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_dcl_seq_xgb_vfa_sh.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_xgb_aboff_nsfull.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_xgb_aboff_ns4.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_xgb_abon_nsfull.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_xgb_abon_ns4.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_nn_aboff_nsfull.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_nn_aboff_ns4.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_nn_abon_nsfull.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_nn_abon_ns4.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_ctrl_emptyinit.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_ctrl_seq.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_ctrl_lowesterror.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/i10p_adp2_ctrl_noflip.json",
+    "run_name": null,
+    "seed": null
   }
 ]

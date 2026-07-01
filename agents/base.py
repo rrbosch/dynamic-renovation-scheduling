@@ -12,6 +12,16 @@ class Agent(ABC):
     def act(self, state: State) -> np.ndarray:
         """Returns action array shape (N,)."""
 
+    def on_episode_start(self, phase: str, episode_idx: int, base_seed: int,
+                         env, horizon: int) -> None:
+        """Hook called by the evaluation harness at the start of each episode,
+        immediately after env.begin_episode()/reset().
+
+        No-op for almost all agents. Anticipative baselines (e.g.
+        ``ClairvoyantAgent``) use it to reconstruct the episode's exact realized
+        noise from ``(phase, base_seed, episode_idx)`` and pre-solve a per-seed
+        plan. ``horizon`` is the evaluation length (T + tail_epochs)."""
+
     def update(self, transitions: list) -> None:
         """No-op for non-learning agents."""
 

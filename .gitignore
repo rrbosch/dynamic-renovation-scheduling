@@ -17,10 +17,11 @@ dist/
 .installed.cfg
 
 # ---- Virtual environments ----
+# NOTE: do NOT add a bare `ENV/` here — with core.ignorecase=true (Windows/macOS)
+# it also matches the source package `env/` and silently untracks core code.
 .venv/
 venv/
 env_venv/
-ENV/
 .env
 
 # ---- Testing / coverage ----

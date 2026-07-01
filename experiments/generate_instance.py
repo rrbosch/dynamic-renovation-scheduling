@@ -93,6 +93,8 @@ def generate_instance(
     ren_noise_cv: float = 0.20,
     restrict_degrad_multiplier: float = 0.5,
     avg_ongoing_projects: float | None = None,
+    asset_links: list[int] | None = None,
+    d_init_override: list[float] | None = None,
 ) -> dict:
     """
     Calibration targets:
@@ -116,8 +118,24 @@ def generate_instance(
       alpha0_sigma  — 0 → all assets have identical alpha0 (homogeneous degradation shape)
       e_fail_cv     — 0 → all assets have identical expected lifetime
       ren_noise_cv  — 0 → renovation duration is deterministic (σ_h = 0)
+
+    Bidirectional-link / synergy controls:
+      asset_links       — explicit list of Sioux Falls bidirectional-link indices to use
+                          as assets (each asset = one link). Stored in the instance as
+                          'asset_links'; n_assets is taken from its length. None ⇒ first
+                          n_assets links.
+      d_init_override   — explicit per-asset initial condition list (length n_assets).
+                          Lets the caller group assets into failure "waves" (high-congestion
+                          -synergy clusters that fail together) deterministically. None ⇒
+                          sampled Uniform(0.3, 0.8).
     """
     rng = np.random.default_rng(seed)
+
+    if asset_links is not None:
+        n_assets = len(asset_links)
+    if d_init_override is not None and len(d_init_override) != n_assets:
+        raise ValueError(
+            f"d_init_override length {len(d_init_override)} != n_assets {n_assets}")
 
     # --- Resolve mean length from target ongoing-projects count (overrides lengths_mean_m) ---
     if avg_ongoing_projects is not None:
@@ -161,9 +179,12 @@ def generate_instance(
     c_ren = 50_000.0 * lengths  # €/asset
     c_rep = 25_000.0 * lengths  # €/asset
 
-    d_init = rng.uniform(0.3, 0.8, size=n_assets)
+    if d_init_override is not None:
+        d_init = np.asarray(d_init_override, dtype=float)
+    else:
+        d_init = rng.uniform(0.3, 0.8, size=n_assets)
 
-    return {
+    out = {
         'schema_version': 1,
         'n_assets': n_assets,
         'network': network,
@@ -179,6 +200,9 @@ def generate_instance(
         'restrict_degrad_multiplier': restrict_degrad_multiplier,
         'lengths_mean_m_resolved': float(lengths_mean_m),
     }
+    if asset_links is not None:
+        out['asset_links'] = [int(x) for x in asset_links]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +601,20 @@ def _parse_args() -> types.SimpleNamespace:
                         help='CV of time-to-fail distribution. 0 = identical lifetimes.')
     parser.add_argument('--ren-noise-cv', type=float, default=0.20,
                         help='Renovation duration noise as fraction of drift. 0 = deterministic.')
+    parser.add_argument('--asset-links', type=str, default=None,
+                        help='Comma-separated Sioux Falls bidirectional-link indices to use as '
+                             'assets (each asset = one link). Overrides --n-assets (n_assets = '
+                             'len(list)). Stored in the instance as "asset_links".')
+    parser.add_argument('--d-init-list', type=str, default=None,
+                        help='Comma-separated per-asset initial conditions (length n_assets). '
+                             'Lets you group assets into synchronized failure "waves" '
+                             'deterministically. Default: sampled Uniform(0.3, 0.8).')
     a = parser.parse_args()
+
+    _asset_links = ([int(x) for x in a.asset_links.split(',')]
+                    if a.asset_links else None)
+    _d_init_list = ([float(x) for x in a.d_init_list.split(',')]
+                    if a.d_init_list else None)
     return types.SimpleNamespace(
         output=a.output,
         n_assets=a.n_assets,
@@ -603,46 +640,27 @@ def _parse_args() -> types.SimpleNamespace:
         vot=a.vot,
         traffic_cost_factor=a.traffic_cost_factor,
         risk_base=a.risk_base,
+        asset_links=_asset_links,
+        d_init_list=_d_init_list,
     )
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Instance assembly (env-level fields + metadata) — shared by main() and builders
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    if len(sys.argv) == 1:
-        args = interactive_mode()
-    else:
-        args = _parse_args()
+def assemble_instance(inst: dict, args) -> tuple[dict, dict]:
+    """Add env-level fields, comments, id and schema to a per-asset core dict.
 
-    if args.output is None:
-        raise SystemExit("error: --output is required in CLI mode (no default).")
-
+    ``inst`` is the dict returned by ``generate_instance`` (per-asset arrays +
+    ``asset_links`` + ``lengths_mean_m_resolved``). ``args`` carries the env-level
+    parameters (years, dt, t_tail_years, gamma, eta_*, vot, traffic_cost_factor, ...).
+    Returns ``(full_inst, meta)`` where ``meta`` has ``resolved_lengths_mean_m`` and
+    ``t_tail_auto`` (for logging). Used by both the CLI ``main()`` and
+    ``build_synergy_instance.py`` so the schema stays in one place.
+    """
     avg_ongoing_projects = getattr(args, 'avg_ongoing_projects', None)
-    # lengths_mean_m may be None on the interactive "use ongoing-projects target" path;
-    # fall back to the function default so the call is well-formed (it's overridden anyway).
-    lengths_mean_m = args.lengths_mean_m if args.lengths_mean_m is not None else 2000.0
-
-    inst = generate_instance(
-        args.n_assets, args.network, args.seed,
-        lengths_mean_m=lengths_mean_m,
-        lengths_cv=args.lengths_cv,
-        alpha0_mean=args.alpha0_mean,
-        alpha0_sigma=args.alpha0_sigma,
-        e_fail_mean=args.e_fail_mean,
-        e_fail_cv=args.e_fail_cv,
-        ren_noise_cv=args.ren_noise_cv,
-        restrict_degrad_multiplier=args.restrict_degrad_multiplier,
-        avg_ongoing_projects=avg_ongoing_projects,
-    )
-
-    # Resolved mean length actually used (back-solved when a target was given).
     resolved_lengths_mean_m = inst.pop('lengths_mean_m_resolved')
-    if avg_ongoing_projects is not None:
-        print(f"  avg_ongoing_projects={avg_ongoing_projects} -> derived "
-              f"lengths_mean_m={resolved_lengths_mean_m:.1f} m "
-              f"(overrides --lengths-mean-m)")
 
     # Evaluation tail length (years). Default = e_fail_mean (1x expected lifespan).
     t_tail_years = getattr(args, 't_tail_years', None)
@@ -679,6 +697,48 @@ def main() -> None:
             't_tail_auto': t_tail_auto,
         },
     })
+    return inst, {'resolved_lengths_mean_m': resolved_lengths_mean_m,
+                  't_tail_auto': t_tail_auto}
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    if len(sys.argv) == 1:
+        args = interactive_mode()
+    else:
+        args = _parse_args()
+
+    if args.output is None:
+        raise SystemExit("error: --output is required in CLI mode (no default).")
+
+    avg_ongoing_projects = getattr(args, 'avg_ongoing_projects', None)
+    # lengths_mean_m may be None on the interactive "use ongoing-projects target" path;
+    # fall back to the function default so the call is well-formed (it's overridden anyway).
+    lengths_mean_m = args.lengths_mean_m if args.lengths_mean_m is not None else 2000.0
+
+    inst = generate_instance(
+        args.n_assets, args.network, args.seed,
+        lengths_mean_m=lengths_mean_m,
+        lengths_cv=args.lengths_cv,
+        alpha0_mean=args.alpha0_mean,
+        alpha0_sigma=args.alpha0_sigma,
+        e_fail_mean=args.e_fail_mean,
+        e_fail_cv=args.e_fail_cv,
+        ren_noise_cv=args.ren_noise_cv,
+        restrict_degrad_multiplier=args.restrict_degrad_multiplier,
+        avg_ongoing_projects=avg_ongoing_projects,
+        asset_links=getattr(args, 'asset_links', None),
+        d_init_override=getattr(args, 'd_init_list', None),
+    )
+
+    inst, meta = assemble_instance(inst, args)
+    if avg_ongoing_projects is not None:
+        print(f"  avg_ongoing_projects={avg_ongoing_projects} -> derived "
+              f"lengths_mean_m={meta['resolved_lengths_mean_m']:.1f} m "
+              f"(overrides --lengths-mean-m)")
 
     os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
     with open(args.output, 'w') as f:
@@ -686,8 +746,8 @@ def main() -> None:
 
     print(f"Generated instance -> {args.output}")
     print(f"  n_assets={inst['n_assets']}, network={inst['network']!r}, seed={inst['generation_seed']}")
-    _tail_note = " (= 1x e_fail_mean)" if t_tail_auto else ""
-    print(f"  T_tail={t_tail_years:.1f} yr{_tail_note}")
+    _tail_note = " (= 1x e_fail_mean)" if meta['t_tail_auto'] else ""
+    print(f"  T_tail={inst['T_tail']:.1f} yr{_tail_note}")
     print_instance_stats(inst, target_ongoing=avg_ongoing_projects)
 
 

@@ -11,8 +11,16 @@ from agents.fn.value_fn import ValueFn
 class ActionGenerator(ABC):
     @abstractmethod
     def generate(self, state: State, value_fn: ValueFn, env: InfraEnv,
-                 rng: np.random.Generator | None = None) -> np.ndarray:
-        """Returns action array shape (N,)."""
+                 rng: np.random.Generator | None = None,
+                 init_action: np.ndarray | None = None) -> np.ndarray:
+        """Returns action array shape (N,).
+
+        `init_action` (optional, shape (N,)) is the action the search starts from.
+        None ⇒ start from the do-nothing action (all zeros). Passing a heuristic's
+        action ('policy' init) seeds a greedy search that can otherwise stall in a
+        do-nothing local optimum. The seed is assumed feasible (it is the warmstart
+        heuristic's own action); the search only ever moves to feasible candidates.
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -21,8 +29,28 @@ class ActionGenerator(ABC):
 
 class LocalSearchGenerator(ActionGenerator):
     """
-    Greedy local search over single-asset deviations.
+    Greedy (steepest-descent) local search over single-asset deviations.
     Ranks actions by Q(s,a) = c_maint + c_risk + c_travel + V'(s_post).
+
+    Each sweep evaluates *all* single-asset deviations from the current action
+    in ONE batched `value_fn.predict` call, then commits the single best
+    improving move (steepest descent), repeating until no move improves Q.
+
+    This batching is the key throughput fix for tree-based value functions
+    (XGBoost): a per-call `predict` carries a large fixed overhead
+    (config_context + array-interface marshalling), so the old one-candidate-at-
+    a-time evaluation spent ~80% of wall time in that fixed cost. Batching
+    collapses ~30 predict calls per decision into one. (The neural VF is also
+    faster batched, though less dramatically.)
+
+    Behaviour note: the previous implementation used *first-improvement*
+    (accept the first deviation that lowers Q, mutating the action mid-sweep).
+    This version is *steepest-descent* (best deviation per sweep). Both are
+    standard single-asset local searches over the same neighbourhood and the
+    same Q; steepest-descent is the natural batched form and is generally at
+    least as good. Results are therefore not bit-identical to the pre-batch
+    code, but the policy class and termination (no improving single-asset move)
+    are unchanged.
     """
 
     def __init__(self, n_restarts: int = 1, log_q_breakdown: bool = False):
@@ -34,36 +62,46 @@ class LocalSearchGenerator(ActionGenerator):
         self.last_metrics: dict = {}
 
     def generate(self, state: State, value_fn: ValueFn, env: InfraEnv,
-                 rng: np.random.Generator | None = None) -> np.ndarray:
+                 rng: np.random.Generator | None = None,
+                 init_action: np.ndarray | None = None) -> np.ndarray:
         cfg = env.config
         feas = env.feasible_actions(state)  # (N, 4) bool — computed once
+        n = cfg.n_assets
         self._n_candidates = 0
 
-        def _q(s, a):
-            self._n_candidates += 1
-            return self._evaluate_q(s, a, value_fn, env)
+        # Search seed: do-nothing (zeros) unless a heuristic action is supplied.
+        init = (np.zeros(n, dtype=int) if init_action is None
+                else np.asarray(init_action, dtype=int))
 
-        best_action = np.zeros(cfg.n_assets, dtype=int)
-        best_q = _q(state, best_action)
+        best_action = init.copy()
+        best_q = self._batch_q(state, [init], value_fn, env)[0]
 
         for _ in range(self.n_restarts):
-            current_action = np.zeros(cfg.n_assets, dtype=int)
-            current_q = _q(state, current_action)
+            current_action = init.copy()
+            current_q = best_q if self.n_restarts == 1 else \
+                self._batch_q(state, [current_action], value_fn, env)[0]
 
             improved = True
             while improved:
                 improved = False
-                for i in range(cfg.n_assets):
-                    for a in range(1, 4):  # try actions 1, 2, 3
-                        if not feas[i, a]:
+                # Build all single-asset deviations from current_action.
+                candidates = []
+                for i in range(n):
+                    cur_a = current_action[i]
+                    for a in range(1, 4):
+                        if a == cur_a or not feas[i, a]:
                             continue
-                        candidate = current_action.copy()
-                        candidate[i] = a
-                        q = _q(state, candidate)
-                        if q < current_q:
-                            current_q = q
-                            current_action = candidate
-                            improved = True
+                        cand = current_action.copy()
+                        cand[i] = a
+                        candidates.append(cand)
+                if not candidates:
+                    break
+                q_vals = self._batch_q(state, candidates, value_fn, env)
+                j = int(np.argmin(q_vals))
+                if q_vals[j] < current_q:
+                    current_q = float(q_vals[j])
+                    current_action = candidates[j]
+                    improved = True
 
             if current_q < best_q:
                 best_q = current_q
@@ -75,15 +113,25 @@ class LocalSearchGenerator(ActionGenerator):
                 _q_breakdown_metrics(state, best_action, value_fn, env))
         return best_action
 
-    def _evaluate_q(self, state: State, action: np.ndarray,
-                    value_fn: ValueFn, env: InfraEnv) -> float:
+    def _batch_q(self, state: State, actions: list[np.ndarray],
+                 value_fn: ValueFn, env: InfraEnv) -> np.ndarray:
+        """Vectorised Q(s,a) = C(s,a) + V'(s_post_a) over a list of actions.
+
+        All post-decision states are predicted in ONE `value_fn.predict` call
+        (the throughput-critical batching). c_maint/c_risk/c_travel are still
+        computed per candidate (travel_cost hits the bounded TAP cache, so
+        repeated post-states are cheap).
         """
-        Q(s, a) = C(s, a) + V'(s_post_a)
-        C(s, a) = c_maint + c_travel + c_risk  (all deterministic given s and a).
-        V' is trained with future-only targets (mc_return - cost).
-        """
-        s_post = env.post_decision_state(state, action, check=False)
-        return env.immediate_cost(state, action, s_post) + value_fn.predict([s_post])[0]
+        self._n_candidates += len(actions)
+        post_states = [env.post_decision_state(state, a, check=False)
+                       for a in actions]
+        v_preds = value_fn.predict(post_states)
+        costs = np.fromiter(
+            (env.immediate_cost(state, a, sp)
+             for a, sp in zip(actions, post_states)),
+            dtype=np.float64, count=len(actions),
+        )
+        return costs + v_preds
 
 
 # ---------------------------------------------------------------------------
@@ -101,11 +149,15 @@ class SequentialGenerator(ActionGenerator):
         self.last_metrics: dict = {}
 
     def generate(self, state: State, value_fn: ValueFn, env: InfraEnv,
-                 rng: np.random.Generator | None = None) -> np.ndarray:
+                 rng: np.random.Generator | None = None,
+                 init_action: np.ndarray | None = None) -> np.ndarray:
         rng = rng or np.random.default_rng()
         cfg = env.config
         n = cfg.n_assets
-        action = np.zeros(n, dtype=int)
+        # Start from the do-nothing action unless a heuristic seed is supplied;
+        # each asset is then re-optimised in random order given the others.
+        action = (np.zeros(n, dtype=int) if init_action is None
+                  else np.asarray(init_action, dtype=int).copy())
         feas = env.feasible_actions(state)  # (N, 4) bool — computed once
         order = rng.permutation(n)
         count = 0
@@ -193,5 +245,6 @@ class BDQGenerator:
         self.use_gat = use_gat
 
     def generate(self, state: State, value_fn: ValueFn, env: InfraEnv,
-                 rng: np.random.Generator | None = None) -> np.ndarray:
+                 rng: np.random.Generator | None = None,
+                 init_action: np.ndarray | None = None) -> np.ndarray:
         raise NotImplementedError("BDQGenerator not yet implemented.")

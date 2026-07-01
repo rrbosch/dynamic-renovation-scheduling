@@ -1,0 +1,67 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "exp0/i10p_dcl_seq_xgb_vfa_sh",
+  "instance": "instances/instance_10p.json",
+  "training": {
+    "eval_interval": 1,
+    "n_eval_episodes": 50,
+    "time_budget": 86400,
+    "n_workers": 16
+  },
+  "agent": {
+    "agent_type": "dcl",
+    "extra": {
+      "class_weight": "balanced_sqrt",
+      "action_search": "sequential",
+      "policy_type": "xgboost",
+      "n_rounds": 100,
+      "samples_per_round": 5000,
+      "collect_steps": 0,
+      "rollout_horizon": 20,
+      "value_fn": "xgboost",
+      "n_rollouts": 20,
+      "rollout_selection": "sequential_halving",
+      "sh_budget_per_arm": 25,
+      "action_threshold": 0.5,
+      "initial_action": "policy",
+      "use_global_context": true,
+      "heuristic_policy": {
+        "agent_type": "reactiveperasset",
+        "extra": {
+          "repair_threshold_0": 1.0296296236163354,
+          "restrict_threshold_0": 0.16414926843856548,
+          "renovate_threshold_0": 0.9408697336052145,
+          "repair_threshold_1": 0.9586893207831457,
+          "restrict_threshold_1": 0.21272619894726882,
+          "renovate_threshold_1": 0.949340961054762,
+          "repair_threshold_2": 0.9804058944108247,
+          "restrict_threshold_2": 0.2028149946977862,
+          "renovate_threshold_2": 0.9135592465460972,
+          "repair_threshold_3": 0.9533159668515832,
+          "restrict_threshold_3": 0.7469621729035021,
+          "renovate_threshold_3": 0.7558704759770882,
+          "repair_threshold_4": 1.0042530184437273,
+          "restrict_threshold_4": 0.8064422762331551,
+          "renovate_threshold_4": 0.9804738456970571,
+          "repair_threshold_5": 0.8395441073960654,
+          "restrict_threshold_5": 1.099627432192123,
+          "renovate_threshold_5": 0.9799197667469031,
+          "repair_threshold_6": 0.9721212624476463,
+          "restrict_threshold_6": 0.6769497096107321,
+          "renovate_threshold_6": 0.966361686427252,
+          "repair_threshold_7": 0.9507776926090369,
+          "restrict_threshold_7": 0.8547712264618876,
+          "renovate_threshold_7": 0.9198890579637355,
+          "repair_threshold_8": 0.945517188091773,
+          "restrict_threshold_8": 0.9971138123832718,
+          "renovate_threshold_8": 0.8998372133972175,
+          "repair_threshold_9": 1.0758290063900333,
+          "restrict_threshold_9": 0.2771084515297034,
+          "renovate_threshold_9": 0.8487191026018628
+        }
+      }
+    }
+  }
+}

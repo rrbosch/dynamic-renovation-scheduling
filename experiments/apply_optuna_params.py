@@ -1,20 +1,28 @@
 """Inject Optuna-tuned heuristic parameters (Exp 0A) into 0B agent configs (Exp 0B).
 
 Exp 0A tunes a heuristic and writes results/<run>/best_params.json. Exp 0B agents
-(ADP warmstart, MC-rollout base policy) must then *consume* those tuned parameters.
-This script performs that handoff reproducibly instead of hand-editing configs.
+(ADP warmstart, MC-rollout base policy, PPO curriculum imitation target) must then
+*consume* those tuned parameters. This script performs that handoff reproducibly
+instead of hand-editing configs.
 
-The two consumer blocks have different schemas (see experiments/configs.py):
-  * warmstart       (training.warmstart):       {"agent_type": H, "extra": {<params>}}
-  * rollout_policy  (agent.extra.rollout_policy): {"agent_type": H, <params...>}   (flat)
+The consumer blocks have different schemas (see experiments/configs.py):
+  * warmstart            (training.warmstart):            {"agent_type": H, "extra": {<params>}}
+  * curriculum_heuristic (training.curriculum_heuristic): {"agent_type": H, "extra": {<params>}}
+  * rollout_policy       (agent.extra.rollout_policy):    {"agent_type": H, <params...>}   (flat)
 
 Usage
 -----
-# ADP policy-warmstart variants <- tuned reactive heuristic
+# ADP warmstart (ALL 24 cells now carry a warmstart block) <- tuned heuristic
 python experiments/apply_optuna_params.py \
-    --params results/i10p_optuna_reactive/best_params.json \
-    --targets "configs/i10p_adp_*_policy_*.json" \
+    --params results/exp0/i10p_optuna_perasset/best_params.json \
+    --targets "configs/i10p_adp_*.json" \
     --block warmstart
+
+# PPO phase-0 imitation target <- tuned heuristic
+python experiments/apply_optuna_params.py \
+    --params results/exp0/i10p_optuna_perasset/best_params.json \
+    --targets "configs/i10p_ppo_curriculum.json" \
+    --block curriculum_heuristic
 
 # MC-rollout base policy <- tuned reactive heuristic
 python experiments/apply_optuna_params.py \
@@ -71,17 +79,25 @@ def _load_params(params_path: Path) -> dict:
 
 def _patch_config(cfg: dict, block: str, heuristic: str, params: dict) -> bool:
     """Patch cfg in place. Returns True if the block existed and was updated."""
-    if block == "warmstart":
+    if block in ("warmstart", "curriculum_heuristic"):
         training = cfg.get("training", {})
-        if "warmstart" not in training:
+        if block not in training:
             return False
-        training["warmstart"] = {"agent_type": heuristic, "extra": dict(params)}
+        training[block] = {"agent_type": heuristic, "extra": dict(params)}
         return True
     if block == "rollout_policy":
         extra = cfg.get("agent", {}).get("extra", {})
         if "rollout_policy" not in extra:
             return False
         extra["rollout_policy"] = {"agent_type": heuristic, **params}
+        return True
+    if block == "heuristic_policy":
+        # DCL base policy (agent.extra.heuristic_policy): nested {agent_type, extra}
+        # schema, same shape as warmstart but under the agent block.
+        extra = cfg.get("agent", {}).get("extra", {})
+        if "heuristic_policy" not in extra:
+            return False
+        extra["heuristic_policy"] = {"agent_type": heuristic, "extra": dict(params)}
         return True
     raise ValueError(f"Unknown block: {block!r}")
 
@@ -93,7 +109,9 @@ def main() -> None:
                         help="Path to an Optuna best_params.json")
     parser.add_argument("--targets", nargs="+", required=True,
                         help="Target config files or globs to patch")
-    parser.add_argument("--block", required=True, choices=["warmstart", "rollout_policy"],
+    parser.add_argument("--block", required=True,
+                        choices=["warmstart", "curriculum_heuristic", "rollout_policy",
+                                 "heuristic_policy"],
                         help="Which consumer block to overwrite")
     parser.add_argument("--heuristic", default=None,
                         help="Heuristic agent_type (default: inferred from --params dir name)")

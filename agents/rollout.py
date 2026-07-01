@@ -48,6 +48,49 @@ def rollout_noise(
     return u, eps
 
 
+def sequential_halving(arms, q_sample_fn, total_budget: int):
+    """Best-arm identification by Sequential Halving (Karnin et al., 2013).
+
+    `arms`            : list of candidate items (e.g. action arrays).
+    `q_sample_fn(arm, n)` : returns the first `n` per-rollout cost samples for
+                        `arm` (shape (n,)). Must be CRN-paired across arms (sample
+                        r uses the same exogenous scenario for every arm) and
+                        should cache, so repeated calls with growing `n` only draw
+                        the incremental samples — that is how the budget is spent.
+    `total_budget`    : total simulation budget B_s = M*|arms| (paper's notation).
+
+    Lower mean cost = better. Runs ceil(log2 k) rounds; each round splits the
+    round budget B/R equally among the surviving arms (cumulative draws), then
+    keeps the better-scoring half. Returns the surviving arm (the argmin of the
+    final mean cost). Deterministic given a deterministic `q_sample_fn`.
+    """
+    import math
+
+    k = len(arms)
+    if k <= 1:
+        return arms[0]
+    n_rounds = max(1, math.ceil(math.log2(k)))
+    survivors = list(range(k))
+    n_drawn = {i: 0 for i in survivors}
+    means: dict[int, float] = {}
+
+    for _ in range(n_rounds):
+        if len(survivors) <= 1:
+            break
+        # Per-arm incremental allocation for this round (paper splits B/R among
+        # the surviving arms each round). At least 1 sample so progress is made.
+        delta = max(1, total_budget // (len(survivors) * n_rounds))
+        for i in survivors:
+            n_drawn[i] += delta
+            q = q_sample_fn(arms[i], n_drawn[i])
+            means[i] = float(np.mean(q))
+        survivors.sort(key=lambda i: means[i])          # ascending cost
+        survivors = survivors[: max(1, len(survivors) // 2)]
+
+    winner = min(survivors, key=lambda i: means[i])
+    return arms[winner]
+
+
 class MonteCarloRolloutAgent(Agent):
     """
     Greedy local search where Q is estimated via Monte Carlo rollouts.
@@ -74,10 +117,20 @@ class MonteCarloRolloutAgent(Agent):
         min_rollouts: int = 20,
         max_rollouts: int | None = 100,
         rollout_batch: int = 5,
+        value_fn=None,
+        sh_budget_per_arm: int | None = None,
     ):
         self.rollout_policy = rollout_policy
         self.env = env
         self.n_rollouts = n_rollouts
+        # Optional value function for truncated-rollout TAIL BOOTSTRAP. When set
+        # (DCL's opt-in rollout_horizon=K path), each single rollout adds
+        # gamma^(K+1) * V(s_trunc) at the truncation epoch instead of stopping at
+        # zero, so a short rollout window still values the long-run cost-to-go.
+        # When None (default; DCL's faithful rollout_horizon=None path and ALL the
+        # active MC-rollout configs) the bootstrap term is never added and
+        # behaviour is bit-identical to the value-function-free rollout.
+        self.value_fn = value_fn
         # Rollout lookahead is a FIXED window measured from the decision epoch.
         # When unspecified we fall back to the planning-horizon length T (a
         # constant, t-independent window), NOT `T - t_next`.
@@ -109,13 +162,19 @@ class MonteCarloRolloutAgent(Agent):
         #   (~sub-1% mean cost regret at ~62% rollouts saved).
         # selection='fixed': legacy behaviour — every candidate gets exactly
         #   n_rollouts rollouts, then argmin.
-        if selection not in ('fixed', 'adaptive'):
-            raise ValueError(f"selection must be 'fixed' or 'adaptive', got {selection!r}")
+        if selection not in ('fixed', 'adaptive', 'sequential_halving'):
+            raise ValueError(
+                "selection must be 'fixed', 'adaptive' or 'sequential_halving', "
+                f"got {selection!r}"
+            )
         self.selection = selection
         self.p_threshold = p_threshold
         self.min_rollouts = min_rollouts
         self.max_rollouts = max_rollouts if max_rollouts is not None else n_rollouts
         self.rollout_batch = max(1, rollout_batch)
+        # Per-arm budget M for Sequential Halving (total B_s = M*|arms|). Defaults
+        # to n_rollouts when unset.
+        self.sh_budget_per_arm = int(sh_budget_per_arm) if sh_budget_per_arm else int(n_rollouts)
         if self.min_rollouts > self.max_rollouts:
             raise ValueError(
                 f"min_rollouts ({self.min_rollouts}) > max_rollouts ({self.max_rollouts})"
@@ -129,6 +188,8 @@ class MonteCarloRolloutAgent(Agent):
         """Greedy local search over single-asset deviations, using MC Q estimates."""
         if self.selection == 'adaptive':
             return self._act_adaptive(state)
+        if self.selection == 'sequential_halving':
+            return self._act_sequential_halving(state)
         cfg = self.env.config
         n = cfg.n_assets
         feas = self.env.feasible_actions(state)  # (N, 4) bool
@@ -345,6 +406,69 @@ class MonteCarloRolloutAgent(Agent):
             n = min(n + self.rollout_batch, self.max_rollouts)
 
     # ------------------------------------------------------------------
+    # Sequential-Halving action selection
+    # ------------------------------------------------------------------
+
+    def _act_sequential_halving(self, state: State) -> np.ndarray:
+        """Greedy local search where each pass picks the best neighbour by
+        Sequential Halving + CRN over {incumbent} ∪ {feasible single-asset
+        deviations}. Stops when the incumbent wins a pass (local optimum).
+
+        SH over the local-search neighbourhood is the tractable analogue of the
+        paper's SH over the full action set A_s, which is infeasible for the
+        combinatorial 4^N joint action space. Same CRN keying as the other
+        selection modes ⇒ fully deterministic."""
+        cfg = self.env.config
+        n = cfg.n_assets
+        feas = self.env.feasible_actions(state)
+        feas[state.d < self.action_threshold, 1:] = False
+
+        cache: dict[bytes, dict] = {}
+        self._sim_count = 0
+        _n_candidates = 0
+
+        if self.initial_action == 'policy':
+            current_action = self.rollout_policy.act(state)
+            current_action = np.where(
+                feas[np.arange(n), current_action], current_action, self.env.ACTION_NONE
+            )
+        else:
+            current_action = np.zeros(n, dtype=int)
+        _n_candidates += 1
+
+        def qfn(action, m):
+            return self._q_samples(state, action, m, cache)
+
+        max_rounds = max(2 * n, 8)
+        improved = True
+        rounds = 0
+        while improved and rounds < max_rounds:
+            improved = False
+            rounds += 1
+            arms = [current_action.copy()]
+            for i in range(n):
+                for a in range(4):
+                    if a == current_action[i] or not feas[i, a]:
+                        continue
+                    cand = current_action.copy()
+                    cand[i] = a
+                    arms.append(cand)
+            _n_candidates += len(arms) - 1
+            if len(arms) == 1:
+                break
+            winner = sequential_halving(arms, qfn, self.sh_budget_per_arm * len(arms))
+            if not np.array_equal(winner, current_action):
+                current_action = winner
+                improved = True
+
+        self.step_metrics = {
+            'n_candidates': _n_candidates,
+            'n_rollout_sims': self._sim_count,
+            'local_search_rounds': rounds,
+        }
+        return current_action
+
+    # ------------------------------------------------------------------
     # Single rollout
     # ------------------------------------------------------------------
 
@@ -395,6 +519,13 @@ class MonteCarloRolloutAgent(Agent):
                 s_post_step, t, (u_bank[k], eps_bank[k])
             )
 
+        # Optional VFA tail bootstrap (DCL's truncated-rollout path). `discount`
+        # here equals gamma^(max_steps+1), the correct weight for the cost-to-go
+        # of `current` (the pre-decision state at the truncation epoch) relative
+        # to the decision epoch. None ⇒ value-function-free (term omitted).
+        if self.value_fn is not None:
+            total += discount * float(self.value_fn.predict([current])[0])
+
         return total
 
     # ------------------------------------------------------------------
@@ -424,6 +555,8 @@ class SequentialMCRolloutAgent(MonteCarloRolloutAgent):
         """Sequential per-asset action selection using MC Q estimates."""
         if self.selection == 'adaptive':
             return self._act_adaptive_sequential(state)
+        if self.selection == 'sequential_halving':
+            return self._act_sequential_halving_sequential(state)
         cfg = self.env.config
         n = cfg.n_assets
         feas = self.env.feasible_actions(state)  # (N, 4) bool
@@ -502,6 +635,51 @@ class SequentialMCRolloutAgent(MonteCarloRolloutAgent):
                 if self._challenger_wins(state, candidate, incumbent, cache):
                     best_a = a
             action[i] = best_a
+
+        self.step_metrics = {
+            'n_candidates': n_candidates,
+            'n_rollout_sims': self._sim_count,
+        }
+        return action
+
+    def _act_sequential_halving_sequential(self, state: State) -> np.ndarray:
+        """Sequential-Halving counterpart of `act`: per asset, pick the best of
+        the (feasible) actions for that asset via SH + CRN, holding earlier
+        assets at their committed choice and completing later assets with the
+        base policy inside each rollout. |arms| ≤ 4 per asset."""
+        cfg = self.env.config
+        n = cfg.n_assets
+        feas = self.env.feasible_actions(state)
+        feas[state.d < self.action_threshold, 1:] = False
+
+        cache: dict[bytes, dict] = {}
+        self._sim_count = 0
+
+        if self.initial_action == 'policy':
+            action = self.rollout_policy.act(state)
+            action = np.where(
+                feas[np.arange(n), action], action, self.env.ACTION_NONE
+            )
+        else:
+            action = np.zeros(n, dtype=int)
+        n_candidates = 0
+
+        def qfn(act_arr, m):
+            return self._q_samples(state, act_arr, m, cache)
+
+        for i in range(n):
+            arms = []
+            for a in range(4):
+                if not feas[i, a]:
+                    continue
+                cand = action.copy()
+                cand[i] = a
+                arms.append(cand)
+            n_candidates += len(arms)
+            if not arms:
+                continue
+            winner = sequential_halving(arms, qfn, self.sh_budget_per_arm * len(arms))
+            action = winner
 
         self.step_metrics = {
             'n_candidates': n_candidates,

@@ -1,215 +1,539 @@
-"""Deep Controlled Learning (DCL) Agent.
+"""Deep Controlled Learning (DCL) — faithful reproduction.
 
-DCL extends MonteCarloRolloutAgent by also training a policy and VFA from
-rollout data, progressively replacing the heuristic rollout policy with the
-learned policy.
+DCL (Temizöz, Imdahl, Dijkman, Lamghari-Idrissi, van Jaarsveld, EJOR 2025;
+arXiv:2011.15122) is approximate policy iteration that casts control as
+*classification*. Each of `n` rounds:
 
-Key loop:
-  better rollout policy → better Q estimates → better actions
-  → better training labels → better policy
+  1. collect a fresh ON-POLICY dataset under the current policy π_i (warm-up L
+     steps, then step forward labelling each visited state with the
+     rollout-IMPROVED action found by a simulation oracle: Sequential-Halving /
+     Wilcoxon / fixed budget + Common Random Numbers);
+  2. train a CLASSIFIER from scratch on those (state, best-action) pairs → π_{i+1};
+  3. π_{i+1} becomes the base/rollout policy for the next round.
 
-The actions stored in the replay buffer are already rollout-optimal (chosen by
-rollout Q search during act()), so no re-rollout is needed during update().
+Canonical DCL is value-function-free; the deployed policy is just the classifier
+(cheap argmax). This module provides the deployed `DCLAgent` (a thin classifier
+wrapper) plus the three action-search DECOMPOSITIONS used to adapt DCL to the
+combinatorial 4^N joint action space of this problem:
+
+  * ``sequential``  — expanded MDP, decide assets in index order; the classifier
+    is conditioned on the partial post-decision state so it anticipates the
+    fill-in. Oracle = SequentialMCRolloutAgent.
+  * ``independent`` — each asset predicted independently + a feasibility
+    coordinator (closest to the plain per-asset classifier). Oracle = local search.
+  * ``local_search`` — autoregressive edit policy over a (3N+1) token space
+    (set asset i to {repair,renovate,restrict}, or STOP). Oracle = local search.
+
+The approximate-policy-iteration LOOP lives in ``training/dcl_trainer.py``
+(DCLTrainer), mirroring PPOAgent/PPOTrainer. The optional truncated-rollout VFA
+bootstrap (DCL's opt-in compute shortcut) is owned by the trainer and passed to
+the oracle; it is NOT part of the deployed agent.
+
+The previous hybrid implementation is preserved at ``agents/dcl_old.py``.
 """
 from __future__ import annotations
 
+import os
+import pickle
 import numpy as np
 
 from agents.base import Agent
-from agents.fn.policy import XGBoostPolicy, NNPolicy, _asset_features, _build_dataset
-from agents.rollout import rollout_noise
+from agents.fn.policy import _asset_features, build_policy_input
 from env.mdp import State, InfraEnv, EnvConfig
 
 
-# ---------------------------------------------------------------------------
-# DCLAgent
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Estimators (per-row classifiers shared by all decompositions)
+# ===========================================================================
 
-class DCLAgent(Agent):
-    """
-    Deep Controlled Learning agent.
+def _class_weights(counts: np.ndarray, scheme: str) -> np.ndarray:
+    """Per-class weights from a class-count vector, for opt-in label balancing.
 
-    Acts via rollout Q local search (like MonteCarloRolloutAgent).
-    Also trains a policy and VFA from rollout data.
-    Progressively replaces the heuristic rollout policy with the learned policy.
-    """
+    The DCL labels are dominated by the do-nothing majority (the rare maintenance
+    actions — esp. renovate — carry the cost signal but are starved), so an
+    unweighted fit effectively ignores them. Schemes:
+      'balanced'      → w ∝ 1/count        (pure inverse-frequency)
+      'balanced_sqrt' → w ∝ 1/sqrt(count)  (damped; gentler on tiny classes)
+    The caller renormalises. Returns shape (K,)."""
+    base = 1.0 / np.maximum(counts.astype(float), 1.0)      # inverse frequency
+    if scheme == 'balanced_sqrt':
+        base = np.sqrt(base)
+    return base
 
-    def __init__(
-        self,
-        policy,               # NNPolicy | XGBoostPolicy
-        value_fn,             # XGBoostValueFn | NeuralValueFn
-        env: InfraEnv,
-        heuristic_policy: Agent,
-        action_gen,           # ActionGenerator (used optionally; we do inline search)
-        rollout_horizon: int,
-        n_rollouts: int,
-        min_samples_train: int,
-        finite_horizon: bool,
-        rng: np.random.Generator,
-    ):
-        self.policy = policy
-        self.value_fn = value_fn
-        self.env = env
-        self.heuristic_policy = heuristic_policy
-        self.action_gen = action_gen
-        self.rollout_horizon = rollout_horizon
-        self.n_rollouts = n_rollouts
-        self.min_samples_train = min_samples_train
-        self.finite_horizon = finite_horizon
-        # Rollout noise is key-derived (CRN); derive a fixed integer seed from the
-        # supplied rng so reproducibility still flows from the config seed.
-        self.seed = int(rng.integers(0, 2**63 - 1))
 
-        self._rollout_policy: Agent = heuristic_policy
-        self._n_updates: int = 0
-        self._fitted: bool = False
+class _XGBEstimator:
+    """xgboost multiclass classifier over prepared feature rows. Refit from
+    scratch each round (DCL trains the classifier afresh on the new dataset)."""
 
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
+    DEFAULT_PARAMS = {
+        'n_estimators': 300,
+        'max_depth': 8,
+        'learning_rate': 0.1,
+        'subsample': 0.8,
+        'n_jobs': -1,
+        'verbosity': 0,
+    }
 
-    def act(self, state: State) -> np.ndarray:
-        """
-        Greedy local search over single-asset deviations using MC rollout Q.
-        Identical structure to MonteCarloRolloutAgent.act().
-        """
-        cfg = self.env.config
-        n = cfg.n_assets
-        feas = self.env.feasible_actions(state)
+    def __init__(self, n_classes: int, params: dict | None = None,
+                 class_weight: str | None = None):
+        self.n_classes = int(n_classes)
+        self.params = {**self.DEFAULT_PARAMS, **(params or {})}
+        self.class_weight = class_weight   # None | 'balanced' | 'balanced_sqrt'
+        self._clf = None
+        self._classes = None       # original integer labels present at fit time
+        self._constant = None      # set when a round's labels are a single class
+        self._fitted = False
 
-        current_action = np.zeros(n, dtype=int)
-        # current_action = self._rollout_policy.act(state)
-        current_q = self._rollout_q(state, current_action)
-
-        improved = True
-        while improved:
-            improved = False
-            for i in range(n):
-                for a in range(0, 4):
-                    if a == current_action[i]:
-                        continue
-                    if not feas[i, a]:
-                        continue
-                    candidate = current_action.copy()
-                    candidate[i] = a
-                    q = self._rollout_q(state, candidate)
-                    if q < current_q:
-                        current_q = q
-                        current_action = candidate
-                        improved = True
-
-        return current_action
-
-    def update(self, transitions: list) -> None:
-        """
-        1. Fit VFA on post-decision future targets.
-        2. Fit policy on stored (already rollout-optimal) actions.
-        3. Increment counter; switch rollout policy at threshold.
-        """
-
-        # 1. VFA update: target = mc_return - cost (future-only discounted return)
-        X = self.value_fn._feats([t.post_state for t in transitions])
-        y = np.array([t.mc_return - t.cost for t in transitions])
-        self.value_fn.fit(X, y)
+    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+        import xgboost as xgb
+        y = np.asarray(y, dtype=int)
+        # xgboost >= 2 dropped the internal label encoder: XGBClassifier needs
+        # CONTIGUOUS 0..K-1 targets. Our label sets are sparse (actions may miss a
+        # class in a round; the 3N+1 token head is inherently sparse), so encode
+        # to dense indices here and map predictions back via self._classes.
+        self._classes = np.unique(y)
+        if self._classes.size < 2:          # degenerate round → constant predictor
+            self._clf, self._constant = None, int(self._classes[0]) if len(y) else 0
+            self._fitted = True
+            return
+        self._constant = None
+        enc = np.searchsorted(self._classes, y)
+        self._clf = xgb.XGBClassifier(**self.params)
+        X = np.asarray(X, dtype=np.float32)
+        if self.class_weight:
+            # Inverse-frequency row weights over the present (dense) classes;
+            # renorm so Σw = n keeps the effective sample size (and LR) stable.
+            counts = np.bincount(enc, minlength=self._classes.size)
+            w = _class_weights(counts, self.class_weight)[enc]
+            w = w / w.sum() * len(w)
+            self._clf.fit(X, enc, sample_weight=w)
+        else:
+            self._clf.fit(X, enc)
         self._fitted = True
 
-        # 2. Policy update: stored actions are already rollout-optimal
-        states = [t.state for t in transitions]
-        actions = np.stack([t.action for t in transitions])  # (B, N)
-        self.policy.fit(states, actions)
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if not self._fitted:
+            return np.zeros(len(X), dtype=int)
+        if self._constant is not None:
+            return np.full(len(X), self._constant, dtype=int)
+        enc = self._clf.predict(np.asarray(X, dtype=np.float32)).astype(int)
+        return self._classes[enc].astype(int)       # map dense index → orig label
 
-        # 3. Increment; switch rollout policy if threshold reached
-        if len(transitions) > self.min_samples_train:
-            self._rollout_policy = self.policy
-            print(
-                f"[DCLAgent] Switched rollout policy from heuristic to learned policy "
-                f"(after collecting {self.min_samples_train} samples)."
-            )
-
-    # ------------------------------------------------------------------
-    # Q estimation via truncated rollout
-    # ------------------------------------------------------------------
-
-    def _rollout_q(self, state: State, action: np.ndarray) -> float:
-        """
-        Q(s, a) = c_imm(s, a) + mean over n_rollouts of truncated rollout.
-        """
-        cfg = self.env.config
-        s_post = self.env.post_decision_state(state, action)
-        c_imm = self.env.immediate_cost(state, action, s_post)
-
-        t_next = state.t + 1
-        K = min(self.rollout_horizon, cfg.T - t_next)
-        if K <= 0:
-            return c_imm
-
-        # Noise keyed on the root `state` (shared across candidate actions) and
-        # the rollout index, giving common random numbers across candidates.
-        futures = [
-            self._single_truncated_rollout(s_post, t_next, state, r)
-            for r in range(self.n_rollouts)
-        ]
-        return c_imm + float(np.mean(futures))
-
-    def _single_truncated_rollout(
-        self, s_post: State, t_start: int, root_state: State, rollout_idx: int
-    ) -> float:
-        """
-        Simulate K steps under _rollout_policy; bootstrap with VFA at truncation.
-
-        Noise is drawn once for this rollout from a (seed, root_state, decision
-        epoch, rollout_idx) key, so candidate actions share common random numbers.
-        Discount starts at gamma^1 relative to the current epoch.
-        """
-        cfg = self.env.config
-        current = s_post.copy()
-        current.t = t_start - 1  # s_post epoch (action taken at t_start-1)
-
-        K = min(self.rollout_horizon, cfg.T - t_start)
-        u_bank, eps_bank = rollout_noise(
-            self.seed, root_state, root_state.t, rollout_idx, K, cfg.n_assets
-        )
-        discount = cfg.gamma
-        total = 0.0
-        t = t_start
-
-        for k in range(K):
-            # Action from rollout policy; mask infeasible to ACTION_NONE
-            raw_action = self._rollout_policy.act(current)
-            feas = self.env.feasible_actions(current)
-            action = np.where(
-                feas[np.arange(cfg.n_assets), raw_action],
-                raw_action,
-                InfraEnv.ACTION_NONE,
-            )
-
-            s_post_step = self.env.post_decision_state(current, action)
-            cost = self.env.immediate_cost(current, action, s_post_step)
-
-            total += discount * cost
-            discount *= cfg.gamma
-
-            # Stochastic transition using this rollout's CRN noise
-            current, t = self.env.stochastic_transition(
-                s_post_step, t, (u_bank[k], eps_bank[k])
-            )
-
-        # Bootstrap with VFA at truncation (returns 0 if not yet fitted)
-        total += discount * float(self.value_fn.predict([current])[0])
-
-        return total
-
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
+    def set_predict_threads(self, n: int) -> None:
+        """Cap xgboost predict threads. The model is fit with n_jobs=-1; inside a
+        process pool each worker must use 1 thread (OMP_NUM_THREADS alone does not
+        override the model's nthread) to avoid n_workers × n_cores oversubscription."""
+        if self._clf is not None:
+            try:
+                self._clf.set_params(n_jobs=n)
+            except Exception:
+                pass
 
     def save(self, path: str) -> None:
-        import os
-        os.makedirs(path, exist_ok=True)
-        self.value_fn.save(os.path.join(path, 'value_fn.pkl'))
-        self.policy.save(os.path.join(path, 'policy.pkl'))
+        with open(path, 'wb') as f:
+            pickle.dump({'clf': self._clf, 'fitted': self._fitted,
+                         'constant': self._constant, 'classes': self._classes,
+                         'n_classes': self.n_classes, 'params': self.params,
+                         'class_weight': self.class_weight}, f)
 
     def load(self, path: str) -> None:
-        import os
-        self.value_fn.load(os.path.join(path, 'value_fn.pkl'))
-        self.policy.load(os.path.join(path, 'policy.pkl'))
+        with open(path, 'rb') as f:
+            d = pickle.load(f)
+        self._clf, self._fitted = d['clf'], d['fitted']
+        self._constant = d.get('constant')
+        self._classes = d.get('classes')
+        self.class_weight = d.get('class_weight')
+        self.n_classes, self.params = d['n_classes'], d['params']
+
+
+class _MLPEstimator:
+    """Torch MLP classifier over prepared feature rows. Inputs are z-scored
+    (stats frozen on the first fit, like NeuralValueFn / the PPO nets — essential
+    for conditioning); trained multi-epoch with cross-entropy each round."""
+
+    def __init__(self, in_dim: int, n_classes: int, hidden_dims=None,
+                 lr: float = 1e-3, epochs: int = 30, batch_size: int = 256,
+                 class_weight: str | None = None):
+        self.in_dim = int(in_dim)
+        self.n_classes = int(n_classes)
+        self.hidden_dims = list(hidden_dims) if hidden_dims else [256, 256]
+        self.lr = float(lr)
+        self.epochs = int(epochs)
+        self.batch_size = int(batch_size)
+        self.class_weight = class_weight   # None | 'balanced' | 'balanced_sqrt'
+        self._model = None
+        self._mu = None
+        self._sd = None
+        self._fitted = False
+
+    def _build(self):
+        import torch.nn as nn
+        layers, d = [], self.in_dim
+        for h in self.hidden_dims:
+            layers += [nn.Linear(d, h), nn.ReLU()]
+            d = h
+        layers.append(nn.Linear(d, self.n_classes))
+        self._model = nn.Sequential(*layers).float()
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+        import torch
+        import torch.nn.functional as F
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.int64)
+        # Faithful DCL retrains the classifier FROM SCRATCH each round: re-init the
+        # weights and recompute input normalization on this round's fresh dataset
+        # (mirrors _XGBEstimator, which builds a new XGBClassifier each fit).
+        self._build()
+        self._mu = X.mean(axis=0)
+        self._sd = X.std(axis=0) + 1e-6
+        Xn = torch.tensor((X - self._mu) / self._sd, dtype=torch.float32)
+        Y = torch.tensor(y, dtype=torch.long)
+        # Opt-in per-class loss weighting (torch's native cross_entropy weight) to
+        # counter the do-nothing label majority; None ⇒ identical to the old loss.
+        weight = None
+        if self.class_weight:
+            counts = np.bincount(y, minlength=self.n_classes)
+            cw = _class_weights(counts, self.class_weight)
+            weight = torch.tensor(cw / cw.sum() * self.n_classes, dtype=torch.float32)
+        opt = torch.optim.Adam(self._model.parameters(), lr=self.lr)
+        n = len(Xn)
+        self._model.train()
+        for _ in range(self.epochs):
+            perm = torch.randperm(n)
+            for b in range(0, n, self.batch_size):
+                idx = perm[b:b + self.batch_size]
+                logits = self._model(Xn[idx])
+                loss = F.cross_entropy(logits, Y[idx], weight=weight)
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+        self._fitted = True
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if not self._fitted:
+            return np.zeros(len(X), dtype=int)
+        import torch
+        Xn = (np.asarray(X, dtype=np.float32) - self._mu) / self._sd
+        with torch.no_grad():
+            logits = self._model(torch.tensor(Xn, dtype=torch.float32))
+            return logits.argmax(dim=-1).numpy().astype(int)
+
+    def save(self, path: str) -> None:
+        import torch
+        torch.save({'state_dict': (self._model.state_dict()
+                                   if self._model is not None else None),
+                    'mu': self._mu, 'sd': self._sd, 'fitted': self._fitted,
+                    'in_dim': self.in_dim, 'n_classes': self.n_classes,
+                    'hidden_dims': self.hidden_dims}, path)
+
+    def load(self, path: str) -> None:
+        import torch
+        d = torch.load(path, weights_only=False)
+        self.in_dim, self.n_classes = d['in_dim'], d['n_classes']
+        self.hidden_dims = d['hidden_dims']
+        self._build()
+        if d['state_dict'] is not None:
+            self._model.load_state_dict(d['state_dict'])
+        self._mu, self._sd, self._fitted = d['mu'], d['sd'], d['fitted']
+
+
+def _make_estimator(kind: str, in_dim: int, n_classes: int, *,
+                    hidden_dims=None, lr=1e-3, epochs=30, batch_size=256,
+                    clf_kwargs=None, class_weight=None):
+    if kind == 'xgboost':
+        return _XGBEstimator(n_classes=n_classes, params=clf_kwargs,
+                             class_weight=class_weight)
+    if kind == 'nn':
+        return _MLPEstimator(in_dim=in_dim, n_classes=n_classes,
+                             hidden_dims=hidden_dims, lr=lr,
+                             epochs=epochs, batch_size=batch_size,
+                             class_weight=class_weight)
+    raise ValueError(f"Unknown estimator kind: {kind!r}")
+
+
+# ===========================================================================
+# Decompositions
+# ===========================================================================
+
+class _BaseDecomposition:
+    """Common interface. A decomposition is BOTH the deployed policy (act/fit/
+    save/load/_fitted) and the factory for the labelling oracle."""
+
+    name = 'base'
+
+    def __init__(self, env: InfraEnv, estimator_kind: str = 'xgboost',
+                 use_global_context: bool = True, hidden_dims=None, lr=1e-3,
+                 epochs=30, batch_size=256, clf_kwargs=None, class_weight=None):
+        self.env = env
+        self.cfg = env.config
+        self.estimator_kind = estimator_kind
+        self.use_global_context = use_global_context
+        self._est_kwargs = dict(hidden_dims=hidden_dims, lr=lr, epochs=epochs,
+                                batch_size=batch_size, clf_kwargs=clf_kwargs,
+                                class_weight=class_weight)
+        self.est = None  # built lazily once in/out dims are known
+
+    @property
+    def _fitted(self) -> bool:
+        return self.est is not None and self.est._fitted
+
+    def set_predict_threads(self, n: int) -> None:
+        """Cap the classifier's predict threads (process-pool workers use 1)."""
+        if self.est is not None and hasattr(self.est, 'set_predict_threads'):
+            self.est.set_predict_threads(n)
+
+    # -- oracle ------------------------------------------------------------
+    def make_oracle(self, base_policy, dcl_cfg, seed: int, value_fn=None):
+        raise NotImplementedError
+
+    def _oracle_kwargs(self, base_policy, dcl_cfg, seed, value_fn):
+        sel = 'adaptive' if dcl_cfg.rollout_selection == 'wilcoxon' else dcl_cfg.rollout_selection
+        return dict(
+            rollout_policy=base_policy, env=self.env,
+            n_rollouts=dcl_cfg.n_rollouts, rollout_horizon=dcl_cfg.rollout_horizon,
+            seed=seed, action_threshold=dcl_cfg.action_threshold,
+            initial_action=dcl_cfg.initial_action, selection=sel,
+            p_threshold=dcl_cfg.p_threshold, min_rollouts=dcl_cfg.min_rollouts,
+            max_rollouts=dcl_cfg.max_rollouts, rollout_batch=dcl_cfg.rollout_batch,
+            value_fn=value_fn, sh_budget_per_arm=dcl_cfg.sh_budget_per_arm,
+        )
+
+    # -- dataset / training -----------------------------------------------
+    def build_rows(self, state: State, label: np.ndarray):
+        """Yield (feature_row, target_class) tuples for one labelled state."""
+        raise NotImplementedError
+
+    def fit(self, states: list[State], labels: np.ndarray) -> None:
+        X, y = [], []
+        for s, lab in zip(states, labels):
+            for feat, tgt in self.build_rows(s, lab):
+                X.append(feat)
+                y.append(tgt)
+        self.est.fit(np.asarray(X, dtype=np.float32), np.asarray(y, dtype=int))
+
+    # -- deployment --------------------------------------------------------
+    def act(self, state: State) -> np.ndarray:
+        raise NotImplementedError
+
+    def save(self, path: str) -> None:
+        if self.est is not None:
+            self.est.save(path)
+
+    def load(self, path: str) -> None:
+        if self.est is not None and os.path.exists(path):
+            self.est.load(path)
+
+
+class SequentialDecomposition(_BaseDecomposition):
+    """Per-asset expanded MDP. Assets decided in index order; the classifier is
+    conditioned on the PARTIAL post-decision state (committed prefix applied), so
+    it anticipates how later assets are filled in. Oracle = SequentialMCRollout."""
+
+    name = 'sequential'
+
+    def __init__(self, env, **kw):
+        super().__init__(env, **kw)
+        F = _asset_features(_dummy_state(self.cfg), self.cfg,
+                            self.use_global_context).shape[1]
+        # +4 commit-context features (see _ctx) so the classifier can anticipate
+        # how the joint action is being filled in (the per-asset _asset_features
+        # global context alone carries no count of already-committed actions).
+        self.est = _make_estimator(self.estimator_kind, in_dim=F + 4, n_classes=4,
+                                   **self._est_kwargs)
+
+    def _ctx(self, action: np.ndarray, i: int) -> np.ndarray:
+        """Commit-context for the i-th decision: fraction of assets already
+        committed, and fractions committed to repair / renovate / restrict
+        (computed over the prefix 0..i-1). Lets the per-asset classifier see the
+        in-progress fill-in (budget / concurrency / network coupling)."""
+        N = self.cfg.n_assets
+        pref = action[:i]
+        return np.array([
+            i / N,
+            float(np.sum(pref == InfraEnv.ACTION_REPAIR)) / N,
+            float(np.sum(pref == InfraEnv.ACTION_RENOVATE)) / N,
+            float(np.sum(pref == InfraEnv.ACTION_RESTRICT)) / N,
+        ], dtype=np.float32)
+
+    def make_oracle(self, base_policy, dcl_cfg, seed, value_fn=None):
+        from agents.rollout import SequentialMCRolloutAgent
+        return SequentialMCRolloutAgent(**self._oracle_kwargs(
+            base_policy, dcl_cfg, seed, value_fn))
+
+    def build_rows(self, state, label):
+        N = self.cfg.n_assets
+        action = np.zeros(N, dtype=int)
+        for i in range(N):
+            partial = self.env.post_decision_state(state, action, check=False)
+            feats = _asset_features(partial, self.cfg, self.use_global_context)
+            yield np.concatenate([feats[i], self._ctx(action, i)]), int(label[i])
+            action[i] = int(label[i])           # commit the label and advance
+
+    def act(self, state):
+        N = self.cfg.n_assets
+        feas = self.env.feasible_actions(state)
+        action = np.zeros(N, dtype=int)
+        for i in range(N):
+            partial = self.env.post_decision_state(state, action, check=False)
+            feats = _asset_features(partial, self.cfg, self.use_global_context)
+            row = np.concatenate([feats[i], self._ctx(action, i)])[None, :]
+            a = int(self.est.predict(row)[0])
+            if not feas[i, a]:
+                a = InfraEnv.ACTION_NONE
+            action[i] = a
+        return action
+
+
+class IndependentDecomposition(_BaseDecomposition):
+    """Each asset predicted independently from the (pre-decision) state, then a
+    feasibility coordinator projects infeasible picks to ACTION_NONE. Oracle =
+    local-search MC rollout."""
+
+    name = 'independent'
+
+    def __init__(self, env, **kw):
+        super().__init__(env, **kw)
+        F = _asset_features(_dummy_state(self.cfg), self.cfg,
+                            self.use_global_context).shape[1]
+        self.est = _make_estimator(self.estimator_kind, in_dim=F, n_classes=4,
+                                   **self._est_kwargs)
+
+    def make_oracle(self, base_policy, dcl_cfg, seed, value_fn=None):
+        from agents.rollout import MonteCarloRolloutAgent
+        return MonteCarloRolloutAgent(**self._oracle_kwargs(
+            base_policy, dcl_cfg, seed, value_fn))
+
+    def build_rows(self, state, label):
+        feats = _asset_features(state, self.cfg, self.use_global_context)
+        for i in range(self.cfg.n_assets):
+            yield feats[i], int(label[i])
+
+    def act(self, state):
+        feats = _asset_features(state, self.cfg, self.use_global_context)
+        pred = self.est.predict(feats)                      # (N,)
+        feas = self.env.feasible_actions(state)             # coordinator
+        N = self.cfg.n_assets
+        return np.where(feas[np.arange(N), pred], pred, InfraEnv.ACTION_NONE)
+
+
+class LocalSearchStopDecomposition(_BaseDecomposition):
+    """Autoregressive edit policy. Token space = 3N + 1: token 3*i + (a-1) sets
+    asset i to action a∈{repair,renovate,restrict}; token 3N = STOP. The
+    classifier maps (flat state features, current partial-action one-hot) → next
+    token; at deployment edits are applied until STOP. Oracle = local search,
+    whose final joint action is decomposed into a canonical edit sequence as the
+    training labels."""
+
+    name = 'local_search'
+
+    def __init__(self, env, finite_horizon: bool = True, **kw):
+        super().__init__(env, **kw)
+        self.finite_horizon = finite_horizon
+        N = self.cfg.n_assets
+        self.stop_token = 3 * N
+        n_classes = 3 * N + 1
+        state_dim = 5 * N + (1 if finite_horizon else 0)
+        in_dim = state_dim + 4 * N                          # state + action one-hot
+        self.est = _make_estimator(self.estimator_kind, in_dim=in_dim,
+                                   n_classes=n_classes, **self._est_kwargs)
+
+    def make_oracle(self, base_policy, dcl_cfg, seed, value_fn=None):
+        from agents.rollout import MonteCarloRolloutAgent
+        return MonteCarloRolloutAgent(**self._oracle_kwargs(
+            base_policy, dcl_cfg, seed, value_fn))
+
+    def _feat(self, state, action):
+        N = self.cfg.n_assets
+        sfeat = build_policy_input(state, N, self.cfg.T, self.finite_horizon)
+        onehot = np.zeros(4 * N, dtype=np.float32)
+        onehot[np.arange(N) * 4 + action] = 1.0
+        return np.concatenate([sfeat, onehot]).astype(np.float32)
+
+    def build_rows(self, state, label):
+        N = self.cfg.n_assets
+        action = np.zeros(N, dtype=int)
+        for i in range(N):
+            a = int(label[i])
+            if a == InfraEnv.ACTION_NONE:
+                continue
+            yield self._feat(state, action), 3 * i + (a - 1)
+            action[i] = a
+        yield self._feat(state, action), self.stop_token        # STOP
+
+    def act(self, state):
+        N = self.cfg.n_assets
+        feas = self.env.feasible_actions(state)
+        action = np.zeros(N, dtype=int)
+        for _ in range(N):                                   # at most N edits
+            tok = int(self.est.predict(self._feat(state, action)[None, :])[0])
+            if tok == self.stop_token:
+                break
+            i, a = divmod(tok, 3)
+            a += 1
+            if i >= N or not feas[i, a]:
+                break                                        # stop on infeasible
+            action[i] = a
+        return action
+
+
+_DECOMPOSITIONS = {
+    'sequential': SequentialDecomposition,
+    'independent': IndependentDecomposition,
+    'local_search': LocalSearchStopDecomposition,
+}
+
+
+def build_decomposition(action_search: str, env: InfraEnv, **kw) -> _BaseDecomposition:
+    if action_search not in _DECOMPOSITIONS:
+        raise ValueError(
+            f"Unknown action_search {action_search!r}; "
+            f"valid: {sorted(_DECOMPOSITIONS)}")
+    cls = _DECOMPOSITIONS[action_search]
+    if action_search != 'local_search':
+        kw.pop('finite_horizon', None)            # only the STOP head uses it
+    return cls(env, **kw)
+
+
+def _dummy_state(cfg: EnvConfig) -> State:
+    N = cfg.n_assets
+    z = np.zeros(N, dtype=float)
+    s = State(z.copy(), z.copy(), z.copy(), z.copy(), z.copy())
+    s.t = 0
+    return s
+
+
+# ===========================================================================
+# Deployed agent
+# ===========================================================================
+
+class DCLAgent(Agent):
+    """Deployed DCL policy. ``act`` runs the trained classifier (the decomposition
+    policy); before any policy-iteration round has trained it, it falls back to
+    the base heuristic. The rollout-improvement oracle and the round loop live in
+    ``DCLTrainer`` — this agent is a thin wrapper, like PPOAgent."""
+
+    def __init__(self, policy: _BaseDecomposition, base_heuristic: Agent,
+                 env: InfraEnv, action_search: str = 'sequential'):
+        self.policy = policy
+        self.base_heuristic = base_heuristic
+        self.env = env
+        self.action_search = action_search
+        self.step_metrics: dict = {}
+
+    def act(self, state: State) -> np.ndarray:
+        if self.policy._fitted:
+            return self.policy.act(state)
+        return self.base_heuristic.act(state)
+
+    # The round loop is driven by DCLTrainer; update() is unused here but kept so
+    # the agent is a "learner" by the Agent ABC convention if ever routed through
+    # the generic Trainer.
+    def update(self, transitions: list) -> None:  # pragma: no cover - unused
+        pass
+
+    def save(self, path: str) -> None:
+        os.makedirs(path, exist_ok=True)
+        self.policy.save(os.path.join(path, 'policy.bin'))
+
+    def load(self, path: str) -> None:
+        self.policy.load(os.path.join(path, 'policy.bin'))

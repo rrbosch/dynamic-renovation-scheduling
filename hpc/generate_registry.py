@@ -4,13 +4,18 @@ Conventions for n_workers (parallelism) and replications (seeds) — including w
 tuning is NOT seed-replicated — are documented in hpc/registry_conventions.md. Read that
 before changing the --seeds expansion or the per-config worker counts.
 
+Write named per-experiment registries under hpc/registries/ (one file per batch); dispatch
+each with `bash hpc/submit.sh <registry> <array>` (job name derived from the filename).
+
 Usage examples
 --------------
-# All non-finished configs in configs/, single run per config (seed from JSON):
-python hpc/generate_registry.py
+# A named batch registry (single run per config, seed from JSON):
+python hpc/generate_registry.py --configs configs/sf15_optuna_*.json \
+    --output hpc/registries/sf15_0a.json
 
 # Specific configs, 5 seeds each:
-python hpc/generate_registry.py --configs configs/exp1_*.json --seeds 0 1 2 3 4
+python hpc/generate_registry.py --configs configs/exp1_*.json --seeds 0 1 2 3 4 \
+    --output hpc/registries/exp1.json
 
 # Specific configs, no seed expansion:
 python hpc/generate_registry.py --configs configs/exp1_reactive.json configs/exp1_paced.json
@@ -141,8 +146,9 @@ def main() -> None:
         help="Seeds to expand each config over. If omitted, seed from each config file is used.",
     )
     parser.add_argument(
-        "--output", default=str(_project_root / "hpc" / "registry.json"),
-        help="Output path for the registry (default: hpc/registry.json)",
+        "--output", default=str(_project_root / "hpc" / "registries" / "registry.json"),
+        help="Output path for the registry (default: hpc/registries/registry.json). "
+             "Name it <experiment>_<appendix>.json so the job name becomes rl_<experiment>_<appendix>.",
     )
     parser.add_argument(
         "--include-finished", action="store_true",
@@ -202,7 +208,7 @@ def main() -> None:
     n = len(entries)
     print(f"\n{n} experiment(s) written to {out_path}")
     if n > 0:
-        print(f"  -> submit with:  hq submit --array 0-{n - 1} --pin taskset --cpus=1 hpc/hq_task.sh")
+        print(f"  -> submit with:  bash hpc/submit.sh {out_path.as_posix()} 0-{n - 1}")
     else:
         print("  (nothing to run)")
 

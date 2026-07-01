@@ -150,15 +150,29 @@ Classic worst-first baseline: renovate the most-degraded eligible assets (option
 > Unknown keys under `agent.extra` for `reactive`, `paced`, `leadtime`, `netconcurrency`, `holding`, `valuedensity`, `worstfirst`, `rollout`, and `sequential_rollout` are **rejected** with a "did you mean…?" error (`_check_extra_keys` in `configs.py`). This prevents a misspelled/renamed key from being silently ignored and falling back to a default.
 
 #### `dcl`
+Faithful Deep Controlled Learning (approximate policy iteration; classifier
+deployed at eval). Dispatched to `DCLTrainer`. See `docs/dcl_faithful_vs_hybrid.md`.
+Unknown `extra` keys are rejected by `_check_extra_keys`.
+
 | Key | Default | Description |
 |---|---|---|
-| `policy_type` | `"xgboost"` | `"xgboost"` or `"nn"` policy |
-| `value_fn` | `"xgboost"` | Value function for the DCL critic |
-| `heuristic_policy` | reactive (thr 0.8) | Base heuristic config (nested agent dict) |
-| `action_gen` | `"local_search"` | Action generator |
-| `rollout_horizon` | `10` | Rollout depth |
-| `n_rollouts` | `5` | Rollouts per estimate |
-| `finite_horizon` | `true` | As above |
+| `action_search` | `"sequential"` | Decomposition: `"sequential"` (per-asset expanded MDP, classifier conditioned on the partial post-decision state), `"independent"` (per-asset classifier + feasibility coordinator), `"local_search"` (autoregressive 3N+1 edit/STOP token head) |
+| `policy_type` | `"xgboost"` | Classifier estimator: `"xgboost"` or `"nn"` |
+| `heuristic_policy` | reactive (thr 0.8) | Round-0 base policy (nested agent dict) |
+| `n_rounds` | `3` | Approximate-policy-iteration rounds |
+| `samples_per_round` | `2000` | Labelled (state, action) pairs collected per round |
+| `collect_steps` | `0` | Per-episode labelled-state cap; `0` = to episode end (labels from t=0) |
+| `rollout_horizon` | `null` | `null` ⇒ full rollout, **value-function-free** (faithful). An int K ⇒ truncate at K and bootstrap the tail with a VFA (compute shortcut) |
+| `value_fn` | `"xgboost"` | VFA for the tail bootstrap — only built/used when `rollout_horizon` is set (`"xgboost"` or `"neural"`) |
+| `n_rollouts` | `30` | Rollouts per Q estimate (fixed budget; M for SH) |
+| `rollout_selection` | `"fixed"` | Rollout-elimination: `"fixed"`, `"wilcoxon"` (paired sequential Wilcoxon), `"sequential_halving"` (SH + CRN over the neighbourhood) |
+| `sh_budget_per_arm` | `n_rollouts` | Per-arm budget M for Sequential Halving (total B = M·\|arms\|) |
+| `p_threshold`, `min_rollouts`, `max_rollouts`, `rollout_batch` | `0.02`, `20`, `100`, `5` | Wilcoxon-budget controls (used when `rollout_selection="wilcoxon"`) |
+| `action_threshold` | `0.0` | Assets with `d <` this may only do `none` during the oracle search. `0.0` = unbiased (faithful); raise (e.g. `0.5`) to prune pristine assets and speed up |
+| `initial_action` | `"policy"` | Oracle local-search seed: `"policy"` (warm-start from base) or `"empty"` |
+| `use_global_context` | `true` | Per-asset classifier global-context features (`sequential`/`independent`) |
+| `finite_horizon` | `true` | Append `t` to features (value fn + `local_search` state features) |
+| `hidden_dims`, `policy_lr`, `policy_epochs`, `policy_batch_size` | `[256,256]`, `1e-3`, `30`, `256` | NN classifier training (when `policy_type="nn"`) |
 
 #### `optuna_heuristic`
 | Key | Default | Description |

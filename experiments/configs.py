@@ -136,9 +136,11 @@ def build_experiment(config: ExperimentConfig):
         _alpha0 = np.asarray(inst['alpha0'], dtype=float)
         _T_tail = float(np.mean(_beta / _alpha0))
 
-    # 2. Network — pass n_assets from instance
+    # 2. Network — pass n_assets (and optional explicit high-synergy link
+    #    selection) from instance. Each asset is one bidirectional link.
     if config.network == 'sioux_falls':
-        network = load_sioux_falls(n_assets=inst['n_assets'])
+        network = load_sioux_falls(
+            n_assets=inst['n_assets'], asset_links=inst.get('asset_links'))
     elif config.network == 'amsterdam':
         network = load_amsterdam()
     else:
@@ -196,6 +198,18 @@ def build_experiment(config: ExperimentConfig):
     # 7. Agent
     _n_workers = int(tc_dict.get('n_workers', 1))
     agent = _build_agent(config.agent, env, config.seed, n_workers=_n_workers)
+    # ADP 'policy' action-search init: seed the local search from the same heuristic
+    # used to warmstart the buffer (training.warmstart). Built here because _build_agent
+    # only sees the `agent` block, not training.warmstart.
+    from agents.dqn import ADPAgent
+    if isinstance(agent, ADPAgent) and agent.init_action_mode == 'policy':
+        _ws_cfg = tc_dict.get('warmstart')
+        if _ws_cfg is None:
+            raise ValueError(
+                "agent.extra.init_action='policy' requires a training.warmstart "
+                "heuristic config (the search seed reuses the warmstart heuristic)."
+            )
+        agent.warmstart_policy = _build_agent(AgentConfig.from_dict(_ws_cfg), env, config.seed)
     # Stable config hash (excludes 'seed' so reseeded runs don't auto-resume mismatched checkpoints)
     _cfg_dict_no_seed = {k: v for k, v in json.loads(config.to_json()).items() if k != 'seed'}
     _config_hash = hashlib.sha256(
@@ -223,7 +237,7 @@ def build_experiment(config: ExperimentConfig):
         buffer_capacity=tc_dict.get('buffer_capacity', 200_000),
         buffer_strategy=tc_dict.get('buffer_strategy', 'fifo'),
         n_eval_episodes=tc_dict.get('n_eval_episodes', 10),
-        n_warmstart_episodes=int(tc_dict.get('n_warmstart_episodes', 0)),
+        n_warmstart_states=int(tc_dict.get('n_warmstart_states', 0)),
         warmstart_agent_config=tc_dict.get('warmstart', None),
         checkpoint_interval=int(tc_dict.get('checkpoint_interval', 0)),
         checkpoint_interval_seconds=float(tc_dict.get('checkpoint_interval_seconds', 1800.0)),
@@ -425,17 +439,57 @@ def build_experiment(config: ExperimentConfig):
             simplified_config = dataclasses.replace(env_config, traffic_cost_factor=0.0)
             curriculum_env = InfraEnv(network, NullTAP(), simplified_config,
                                       rng_seed=config.seed + 9999)
-            from agents.heuristics import ReactiveAgent
-            heuristic_agent = ReactiveAgent(
-                threshold=0.99,
-                env_config=simplified_config,
-                repair_threshold=0.9,
-                restrict_threshold=0.7,
-            )
+            # Phase-0 imitation target: configurable via training.curriculum_heuristic
+            # ({"agent_type": ..., "extra": {...}}, same schema as warmstart). Built on
+            # the simplified curriculum env. Falls back to a hardcoded reactive heuristic
+            # for configs that don't specify one.
+            _ch_cfg = tc_dict.get('curriculum_heuristic')
+            if _ch_cfg is not None:
+                heuristic_agent = _build_agent(
+                    AgentConfig.from_dict(_ch_cfg),
+                    curriculum_env, config.seed,
+                )
+            else:
+                from agents.heuristics import ReactiveAgent
+                heuristic_agent = ReactiveAgent(
+                    threshold=0.99,
+                    env_config=simplified_config,
+                    repair_threshold=0.9,
+                    restrict_threshold=0.7,
+                )
 
         trainer = PPOTrainer(agent, env, ppo_config, logger,
                              curriculum_env=curriculum_env,
                              heuristic_agent=heuristic_agent)
+    elif config.agent.agent_type == 'dcl':
+        from training.dcl_trainer import DCLConfig, DCLTrainer
+        dx = config.agent.extra or {}
+        dcl_config = DCLConfig(
+            n_rounds=int(dx.get('n_rounds', 3)),
+            samples_per_round=int(dx.get('samples_per_round', 2000)),
+            collect_steps=int(dx.get('collect_steps', 0)),
+            rollout_horizon=dx.get('rollout_horizon', None),
+            n_rollouts=int(dx.get('n_rollouts', 30)),
+            rollout_selection=dx.get('rollout_selection', 'fixed'),
+            sh_budget_per_arm=dx.get('sh_budget_per_arm', None),
+            p_threshold=float(dx.get('p_threshold', 0.02)),
+            min_rollouts=int(dx.get('min_rollouts', 20)),
+            max_rollouts=int(dx.get('max_rollouts', 100)),
+            rollout_batch=int(dx.get('rollout_batch', 5)),
+            action_threshold=float(dx.get('action_threshold', 0.0)),
+            initial_action=dx.get('initial_action', 'policy'),
+            value_fn_kind=dx.get('value_fn', 'xgboost'),
+            finite_horizon=bool(dx.get('finite_horizon', True)),
+            eval_interval=int(tc_dict.get('eval_interval', 1)),
+            n_eval_episodes=int(tc_dict.get('n_eval_episodes', 10)),
+            time_budget=float(tc_dict.get('time_budget', 86400.0)),
+            T_tail=_T_tail,
+            seed=config.seed,
+            config_hash=_config_hash,
+            n_workers=int(tc_dict.get('n_workers', 1)),
+            tap_backend=config.tap_backend,
+        )
+        trainer = DCLTrainer(agent, env, dcl_config, logger)
     else:
         trainer = Trainer(agent, env, training_config, logger, seed=config.seed,
                           tap_backend=config.tap_backend)
@@ -477,6 +531,18 @@ _ROLLOUT_EXTRA_KEYS = {
     'initial_action', 'rollout_selection', 'p_threshold', 'min_rollouts',
     'max_rollouts', 'rollout_batch', 'rollout_policy',
 }
+_DCL_EXTRA_KEYS = {
+    # decomposition + classifier
+    'action_search', 'policy_type', 'value_fn', 'finite_horizon',
+    'use_global_context', 'hidden_dims', 'policy_lr', 'policy_epochs',
+    'policy_batch_size', 'clf_kwargs', 'class_weight', 'heuristic_policy',
+    # approximate-policy-iteration loop
+    'n_rounds', 'samples_per_round', 'collect_steps',
+    # rollout-improvement oracle
+    'rollout_horizon', 'n_rollouts', 'rollout_selection', 'sh_budget_per_arm',
+    'p_threshold', 'min_rollouts', 'max_rollouts', 'rollout_batch',
+    'action_threshold', 'initial_action',
+}
 _REACTIVE_EXTRA_KEYS = {'threshold', 'repair_threshold', 'restrict_threshold'}
 _PACED_EXTRA_KEYS = {'threshold', 'pace_threshold'}
 _LEADTIME_EXTRA_KEYS = {'lead_epochs', 'repair_lead', 'restrict_lead'}
@@ -485,6 +551,16 @@ _HOLDING_EXTRA_KEYS = {'threshold', 'max_concurrent', 'defer_window',
                        'restrict_flow_quantile'}
 _VALUEDENSITY_EXTRA_KEYS = {'max_concurrent', 'risk_weight', 'degrad_weight', 'threshold'}
 _WORSTFIRST_EXTRA_KEYS = {'max_concurrent', 'threshold', 'use_length'}
+_CLAIRVOYANT_EXTRA_KEYS = {'use_dp', 'warm_start', 'max_sweeps', 'time_budget_s',
+                          'n_grid', 'nf_max'}
+_EXPLORE_FLIP_EXTRA_KEYS = {'base', 'p_base', 'p_high', 'd_ref', 'act_bias', 'renovate_bias'}
+_FLIP_SEED_SALT = 0x666C6970  # 'flip' — keep the flip rng stream independent
+_MIXTURE_EXTRA_KEYS = {'policies'}
+# Allowed keys for one entry of a mixture's `policies` list.
+_MIXTURE_ENTRY_KEYS = {'weight', 'agent_type', 'extra', 'value_fn', 'action_gen'}
+_MIXTURE_SAMPLED_ENTRY_KEYS = {'weight', 'agent_type', 'renovate_range',
+                               'repair_gap_range', 'restrict_gap_range'}
+_MIXTURE_SEED_SALT = 0x6D6978  # 'mix' — keep the mixture rng independent of the flip rng
 
 
 def _asset_flow_proxy(env: InfraEnv) -> np.ndarray:
@@ -514,6 +590,43 @@ def _perasset_thresholds_from_extra(extra: dict, n: int) -> np.ndarray:
         [extra[f'restrict_threshold_{i}'] for i in range(n)],
         [extra[f'renovate_threshold_{i}'] for i in range(n)],
     ])  # shape (N, 3)
+
+
+def _mixture_policy_factory(p: dict, env: InfraEnv, seed: int):
+    """Build a ``factory(rng) -> Agent`` for one entry of a mixture's ``policies`` list.
+
+    ``agent_type == 'reactive_sampled'`` is a pseudo-type valid ONLY inside a mixture:
+    each episode it samples thresholds ``res <= rep <= ren`` (renovate from
+    ``renovate_range``; repair/restrict offset below it by ``repair_gap_range`` /
+    ``restrict_gap_range``) and returns a fresh ``ReactiveAgent``. Any other agent_type
+    is a normal spec, built once (the factory ignores ``rng`` and returns it)."""
+    pt = p.get('agent_type')
+    if pt == 'reactive_sampled':
+        unknown = set(p) - _MIXTURE_SAMPLED_ENTRY_KEYS
+        if unknown:
+            raise ValueError(
+                f"Unknown key(s) in mixture 'reactive_sampled' entry: {sorted(unknown)}; "
+                f"valid: {sorted(_MIXTURE_SAMPLED_ENTRY_KEYS)}")
+        from agents.heuristics import ReactiveAgent
+        cfg = env.config
+        ren_r = tuple(p.get('renovate_range', (0.55, 1.0)))
+        rep_g = tuple(p.get('repair_gap_range', (0.05, 0.30)))
+        res_g = tuple(p.get('restrict_gap_range', (0.05, 0.30)))
+
+        def factory(rng, cfg=cfg, ren_r=ren_r, rep_g=rep_g, res_g=res_g):
+            ren = float(rng.uniform(*ren_r))
+            rep = max(0.0, ren - float(rng.uniform(*rep_g)))
+            res = max(0.0, rep - float(rng.uniform(*res_g)))
+            return ReactiveAgent(ren, cfg, repair_threshold=rep, restrict_threshold=res)
+        return factory
+
+    unknown = set(p) - _MIXTURE_ENTRY_KEYS
+    if unknown:
+        raise ValueError(
+            f"Unknown key(s) in mixture policy entry (agent_type={pt!r}): {sorted(unknown)}; "
+            f"valid: {sorted(_MIXTURE_ENTRY_KEYS)}")
+    sub = _build_agent(AgentConfig.from_dict(p), env, seed)   # 'weight' ignored by from_dict
+    return lambda rng, sub=sub: sub
 
 
 def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers: int = 1) -> Agent:
@@ -603,6 +716,12 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
     if at in ('adp', 'dqn', 'actor_critic'):
         finite_horizon = extra.get('finite_horizon', True)
         vf = _build_value_fn(agent_config.value_fn, finite_horizon=finite_horizon)
+        # (c) Advantage target: subtract a per-epoch baseline b(t) from the ADP
+        # cost-to-go target so the value fn resolves the act-vs-wait signal
+        # instead of the dominant time trend. predict adds b(t) back, so the
+        # action-generator Q reconstruction stays a valid cost estimate (XGB+NN).
+        if extra.get('advantage_baseline', False):
+            vf.set_baseline_enabled(True)
         ag = _build_action_gen(agent_config.action_gen,
                                log_q_breakdown=extra.get('log_q_breakdown', False))
 
@@ -610,7 +729,12 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
 
         if at == 'adp':
             from agents.dqn import ADPAgent
-            return ADPAgent(vf, ag, env, TrainingConfig(), finite_horizon=finite_horizon)
+            # init_action: 'empty' (search from do-nothing) | 'policy' (search from
+            # the warmstart heuristic's action). The warmstart_policy itself is
+            # attached in build_experiment, which can see training.warmstart.
+            return ADPAgent(vf, ag, env, TrainingConfig(), finite_horizon=finite_horizon,
+                            init_action_mode=extra.get('init_action', 'empty'),
+                            n_step=int(extra.get('n_step', 0)))
 
         if at == 'dqn':
             from agents.dqn import DQNAgent
@@ -681,46 +805,86 @@ def _build_agent(agent_config: AgentConfig, env: InfraEnv, seed: int, n_workers:
         )
 
     if at == 'dcl':
-        from agents.dcl import DCLAgent, XGBoostPolicy, NNPolicy
+        _check_extra_keys(at, extra, _DCL_EXTRA_KEYS)
+        from agents.dcl import DCLAgent, build_decomposition
 
-        finite_horizon = extra.get('finite_horizon', True)
-        policy_type    = extra.get('policy_type', 'xgboost')
-
-        value_fn = _build_value_fn(extra.get('value_fn', 'xgboost'), finite_horizon=finite_horizon)
-
-        n_assets = env.config.n_assets
-        if policy_type == 'nn':
-            from agents.fn.policy import PolicyNetwork
-            input_dim = 5 * n_assets + (1 if finite_horizon else 0)
-            net    = PolicyNetwork(input_dim, n_assets,
-                                   hidden_dims=extra.get('hidden_dims', [256, 256]),
-                                   T=env.config.T, finite_horizon=finite_horizon)
-            policy = NNPolicy(net, lr=extra.get('policy_lr', 1e-3))
-        else:  # 'xgboost'
-            policy = XGBoostPolicy(
-                n_assets=n_assets,
-                env_config=env.config,
-                use_global_context=extra.get('use_global_context', True),
-                clf_kwargs=extra.get('clf_kwargs', {}),
-            )
-
+        action_search = extra.get('action_search', 'sequential')
+        decomposition = build_decomposition(
+            action_search,
+            env,
+            estimator_kind=extra.get('policy_type', 'xgboost'),
+            use_global_context=extra.get('use_global_context', True),
+            hidden_dims=extra.get('hidden_dims', [256, 256]),
+            lr=extra.get('policy_lr', 1e-3),
+            epochs=extra.get('policy_epochs', 30),
+            batch_size=extra.get('policy_batch_size', 256),
+            clf_kwargs=extra.get('clf_kwargs', None),
+            class_weight=extra.get('class_weight', None),
+            finite_horizon=extra.get('finite_horizon', True),
+        )
         heuristic_cfg = extra.get('heuristic_policy',
                                   {'agent_type': 'reactive', 'extra': {'threshold': 0.8}})
-        heuristic_policy = _build_agent(AgentConfig(**heuristic_cfg), env, seed)
-        action_gen       = _build_action_gen(extra.get('action_gen', 'local_search'))
+        heuristic = _build_agent(AgentConfig.from_dict(heuristic_cfg), env, seed)
+        return DCLAgent(policy=decomposition, base_heuristic=heuristic,
+                        env=env, action_search=action_search)
 
-        return DCLAgent(
-            policy=policy,
-            value_fn=value_fn,
-            env=env,
-            heuristic_policy=heuristic_policy,
-            action_gen=action_gen,
-            rollout_horizon=extra.get('rollout_horizon', 10),
-            n_rollouts=extra.get('n_rollouts', 5),
-            min_samples_train=extra.get('min_samples_train', 5000),
-            finite_horizon=finite_horizon,
-            rng=np.random.default_rng(seed + 999),
+    if at == 'clairvoyant':
+        # Perfect-information (wait-and-see) baseline. Solves a per-seed
+        # deterministic plan from the episode's exact replayed noise; a lower
+        # bound on any non-anticipative policy's cost. `warm_start` is an optional
+        # {agent_type, extra} heuristic spec used as a local-search start.
+        _check_extra_keys(at, extra, _CLAIRVOYANT_EXTRA_KEYS)
+        from agents.clairvoyant import ClairvoyantAgent
+        _tb = extra.get('time_budget_s', None)
+        _ms = extra.get('max_sweeps', None)          # None ⇒ run BCD to its local optimum
+        return ClairvoyantAgent(
+            use_dp=bool(extra.get('use_dp', True)),
+            warm_start_spec=extra.get('warm_start', None),
+            max_sweeps=(int(_ms) if _ms is not None else None),
+            time_budget_s=(float(_tb) if _tb is not None else None),
+            n_grid=int(extra.get('n_grid', 128)),
+            nf_max=int(extra.get('nf_max', 24)),
+            seed=seed,
         )
+
+    if at == 'donothing':
+        _check_extra_keys(at, extra, set())
+        from agents.heuristics import DoNothingAgent
+        return DoNothingAgent(env.config)
+
+    if at == 'explore_flip':
+        # Behavior wrapper: base policy + the old warmstart "bit-flip" exploration.
+        # Composes as a mixture mode (flip-wrap a reactive mode, leave do-nothing pure).
+        _check_extra_keys(at, extra, _EXPLORE_FLIP_EXTRA_KEYS)
+        base_spec = extra.get('base')
+        if not base_spec:
+            raise ValueError("agent_type='explore_flip' requires a 'base' policy spec in agent.extra.")
+        from agents.heuristics import FlipWrapperAgent
+        base = _build_agent(AgentConfig.from_dict(base_spec), env, seed)
+        rng = np.random.default_rng(np.random.SeedSequence([int(seed), _FLIP_SEED_SALT]))
+        return FlipWrapperAgent(
+            base, env, rng,
+            p_base=float(extra.get('p_base', 1.0 / 120)),
+            p_high=float(extra.get('p_high', 0.50)),
+            d_ref=float(extra.get('d_ref', 0.5)),
+            act_bias=float(extra.get('act_bias', 0.9)),
+            renovate_bias=float(extra.get('renovate_bias', 0.7)),
+        )
+
+    if at == 'mixture':
+        # Per-episode weighted mixture of behavior policies (warmstart diversification).
+        # Flips are now per-policy: to add acting-bias exploration to a mode, make that
+        # mode an 'explore_flip' wrapping a base policy — and leave the 'donothing' mode
+        # un-wrapped so failure-coverage episodes stay pure.
+        _check_extra_keys(at, extra, _MIXTURE_EXTRA_KEYS)
+        from agents.mixture import MixtureAgent
+        policies = extra.get('policies', [])
+        if not policies:
+            raise ValueError("agent_type='mixture' requires a non-empty 'policies' list in agent.extra.")
+        modes = [(float(p.get('weight', 1.0)), _mixture_policy_factory(p, env, seed))
+                 for p in policies]
+        rng = np.random.default_rng(np.random.SeedSequence([int(seed), _MIXTURE_SEED_SALT]))
+        return MixtureAgent(modes, rng)
 
     raise ValueError(f"Unknown agent_type: {at!r}")
 

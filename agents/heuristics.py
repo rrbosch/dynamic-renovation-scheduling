@@ -38,6 +38,82 @@ class HeuristicAgent(Agent):
             setattr(self, k, v)
 
 
+class DoNothingAgent(HeuristicAgent):
+    """Always do nothing (all-zero action).
+
+    A behavior baseline; primarily used as one mode of the warmstart ``MixtureAgent``,
+    where sustained do-nothing episodes are the only way to build up the high-``n_fail``
+    (escalating-risk) states a reactive warmstart never reaches — the coverage fix for
+    the ADP value function's failure-cost under-prediction
+    (see docs/adp_value_fn_improvements.md).
+    """
+
+    def __init__(self, env_config: EnvConfig):
+        self.env_config = env_config
+
+    def act(self, state: State) -> np.ndarray:
+        return np.zeros(self.env_config.n_assets, dtype=int)
+
+    def _heuristic_params(self) -> dict:
+        return {}
+
+
+class FlipWrapperAgent(Agent):
+    """Wrap a base policy with the warmstart "bit-flip" exploration.
+
+    Per asset, with a condition(d)-ramped probability `p_flip` (from `p_base` at
+    `d<=d_ref` up to `p_high` at `d=d_fail`), override the base action with a random
+    *feasible* action biased toward acting (esp. renovate). This gives the value
+    function coverage of acting post-states near failure that a ~98%-do-nothing
+    heuristic never produces.
+
+    Previously baked into `Trainer._run_warmstart`; now a composable behavior wrapper
+    (a warmstart `MixtureAgent` can flip-wrap its reactive modes while leaving the
+    do-nothing mode pure). COLLECTION-ONLY / not parallelism-invariant: it consumes an
+    explicit *per-step* `np.random.Generator`, deterministic for the sequential
+    warmstart loop (same family as `MixtureAgent`). With `p_base == p_high == 0` it is a
+    transparent pass-through of `base`.
+    """
+
+    ACT_NONE, ACT_REPAIR, ACT_RENOVATE, ACT_RESTRICT = 0, 1, 2, 3
+
+    def __init__(self, base: Agent, env: InfraEnv, rng: np.random.Generator,
+                 p_base: float = 1.0 / 120, p_high: float = 0.50, d_ref: float = 0.5,
+                 act_bias: float = 0.9, renovate_bias: float = 0.7):
+        self.base = base
+        self.env = env
+        self._rng = rng
+        self.p_base = p_base
+        self.p_high = p_high
+        self.d_ref = d_ref
+        self.act_bias = act_bias
+        self.renovate_bias = renovate_bias
+        self._denom = max(1e-9, float(env.config.d_fail) - d_ref)
+
+    def act(self, state: State) -> np.ndarray:
+        action = np.asarray(self.base.act(state)).copy()
+        if self.p_base == 0.0 and self.p_high == 0.0:
+            return action
+        rng = self._rng
+        feas = self.env.feasible_actions(state)            # (N, 4) bool
+        ramp = np.clip((state.d - self.d_ref) / self._denom, 0.0, 1.0)
+        p_flip_i = self.p_base + (self.p_high - self.p_base) * ramp
+        for i in range(self.env.config.n_assets):
+            if rng.random() >= p_flip_i[i]:
+                continue
+            feasible_i = np.where(feas[i])[0]
+            acting = feasible_i[feasible_i != self.ACT_NONE]
+            if acting.size > 0 and rng.random() < self.act_bias:
+                if self.ACT_RENOVATE in acting and rng.random() < self.renovate_bias:
+                    action[i] = self.ACT_RENOVATE
+                else:
+                    rest = acting[acting != self.ACT_RENOVATE]
+                    action[i] = int(rng.choice(rest if rest.size > 0 else acting))
+            else:
+                action[i] = int(rng.choice(feasible_i))
+        return action
+
+
 class ReactiveAgent(HeuristicAgent):
     """
     Per-asset action priority (highest to lowest): renovate > repair > restrict > nothing.

@@ -22,15 +22,31 @@ class ValueBasedAgent(Agent, abc.ABC):
         env: InfraEnv,
         training_config,  # TrainingConfig — imported lazily to avoid circular
         finite_horizon: bool = True,
+        init_action_mode: str = 'empty',
+        warmstart_policy: 'Agent | None' = None,
+        n_step: int = 0,
     ):
         self.value_fn = value_fn
         self.action_gen = action_gen
         self.env = env
         self.training_config = training_config
         self.finite_horizon = finite_horizon
+        # n-step ADP target: 0 ⇒ full-horizon MC return (default). >0 ⇒ the trainer's
+        # backward pass uses an n-step return bootstrapped off V' (see
+        # training.trainer._assign_mc_returns). ADP-only; ignored by DQN (uses TD target).
+        self.n_step = int(n_step)
+        # Action-search seed: 'empty' starts from do-nothing; 'policy' starts the
+        # search from `warmstart_policy`'s action at each decision (set externally
+        # in build_experiment — same heuristic used to warmstart the buffer).
+        self.init_action_mode = init_action_mode
+        self.warmstart_policy = warmstart_policy
 
     def act(self, state: State) -> np.ndarray:
-        action = self.action_gen.generate(state, self.value_fn, self.env)
+        init_action = None
+        if self.init_action_mode == 'policy' and self.warmstart_policy is not None:
+            init_action = self.warmstart_policy.act(state)
+        action = self.action_gen.generate(state, self.value_fn, self.env,
+                                          init_action=init_action)
         self.step_metrics = dict(getattr(self.action_gen, 'last_metrics', {}))
         return action
 
@@ -63,8 +79,11 @@ class ADPAgent(ValueBasedAgent):
             return
 
         y = np.array([t.mc_return - t.cost for t in transitions])
-        X = self.value_fn._feats([t.post_state for t in transitions])
-        self.value_fn.fit(X, y)
+        post_states = [t.post_state for t in transitions]
+        # fit_targets fits on the post-decision states; when the value fn has the
+        # per-epoch baseline enabled it learns the advantage y - b(t) and adds
+        # b(t) back on predict (Q reconstruction in the action gens unchanged).
+        self.value_fn.fit_targets(post_states, y)
 
         # Update prediction errors for buffer strategies
         if hasattr(self.value_fn, 'last_rank_errors') and self.value_fn.last_rank_errors is not None:

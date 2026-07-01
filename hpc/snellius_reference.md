@@ -1,8 +1,8 @@
 # Snellius Reference (offline)
 
 Compiled scheduling/partition/accounting reference for Snellius (SURF), so we don't have to
-re-derive or re-look-up these facts. Complements `hpc/snellius_manual.md` (HQ workflow) and
-`hpc/registry_conventions.md`.
+re-derive or re-look-up these facts. Complements `hpc/snellius_manual.md` (the SLURM-array run
+manual) and `hpc/registry_conventions.md` (named registries + job-name convention).
 
 **Sources:** SURF User Knowledge Base (links at bottom) + **live `scontrol`/`sacctmgr` queries run
 2026-06-17** on the `ttsei13069` account (raw output in the Appendix). Where the live cluster config
@@ -33,8 +33,9 @@ A worker in our last run reported `cpus: 8x16 = 128, mem 251.67 GiB` → a full 
 - **Multi-node jobs are ALWAYS exclusive.** Per SURF: "Jobs requesting more than 1 node will get
   exclusive access … independent of the amount of core/memory requested." (Enforced by SURF's
   job-submit policy, not visible in `scontrol`.)
-- **You only get a whole node to yourself** by requesting all its cores (e.g. `--cpus-per-task=128`,
-  which is what `hpc/submit.sh` does) or by passing `--exclusive`.
+- **You only get a whole node to yourself** by requesting all its cores (e.g. `--cpus-per-task=128`)
+  or by passing `--exclusive`. Our array uses `--cpus-per-task=16` (a shared 1/8-node slot), so it
+  never reserves a whole node.
 
 **Implication:** an array of single-node tasks (`--cpus-per-task=16`) does **not** waste whole nodes —
 SLURM packs up to 8 per node. The earlier "16× waste" worry was wrong; nodes are shared. (16, not 8,
@@ -91,10 +92,11 @@ concurrent** — no QOS bottleneck. This removes the main reason to prefer HQ's 
 #SBATCH --array=0-28%128            # %N caps concurrency; 128 is the QOS ceiling anyway
 #SBATCH --exclusive                 # ONLY if you want the whole node to yourself
 ```
-- DefaultTime is 5 min — always set `--time`.
-- For a SLURM-array port: each task runs one config via `run_task.py` keyed on
-  `$SLURM_ARRAY_TASK_ID`; align cores with `n_workers` (8) or bump both to 16 if matching a billing
-  increment turns out to matter.
+- DefaultTime is 5 min — always set `--time` (`submit_array.sh` sets 28h).
+- Implemented in `hpc/submit_array.sh`: each array task runs one registry entry via
+  `run_task.py --expe_id=$SLURM_ARRAY_TASK_ID --registry <file>`; `--cpus-per-task=16` matches
+  `n_workers=16` (the min billed slot). `--array` is supplied on the CLI (via `hpc/submit.sh`),
+  not baked into the script.
 
 ---
 
@@ -113,10 +115,11 @@ alternative** whose only real costs are the resumption-keying rewrite (acceptabl
 billing increment. HQ remains fine **if** the server is moved off the login node (tmux on a pinned
 `intN`, or run server+worker inside the batch job).
 
-**Implemented:** `hpc/submit_array.sh` is the native-array path (no HQ server/worker). It reuses
-`hpc/run_task.py` via `$SLURM_ARRAY_TASK_ID`; submit with `sbatch --array=0-24 hpc/submit_array.sh`
-(PPO+ADP, resumes from checkpoints) and `sbatch --array=25-28 hpc/submit_array.sh` (rollout). The HQ
-scripts (`submit.sh`, `hq_task.sh`) are kept as a fallback.
+**Implemented:** `hpc/submit_array.sh` is the native-array path (no HQ server/worker). It runs one
+**named-registry** entry per task via `run_task.py --expe_id=$SLURM_ARRAY_TASK_ID --registry <file>`;
+dispatch a batch with `bash hpc/submit.sh hpc/registries/<name>.json <array>` (derives job name
+`rl_<name>`, e.g. `bash hpc/submit.sh hpc/registries/sf15_0a.json 0-7`). Only `hq_task.sh` remains as
+the deprecated HQ fallback — `submit.sh` is now the wrapper. Full workflow: `hpc/snellius_manual.md`.
 
 ---
 
