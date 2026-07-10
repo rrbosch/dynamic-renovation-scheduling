@@ -25,26 +25,84 @@ ROOT = OUT.parent
 REG = ROOT / "hpc" / "registries"
 INSTANCE = "instances/instance_sf20.json"
 
-# ---- per-asset (0A winner) params: Snellius output, else laptop fallback -------------------
-_PA_SNELLIUS = ROOT / "results" / "exp0" / "sf20_optuna_perasset" / "best_params.json"
-_PA_LAPTOP = ROOT / "results" / "cal" / "sf20_perasset" / "best_params.json"
+# ---- 0B base policy = the 0A WINNER (lowest held-out cost), not hardcoded per-asset ---------
+# sf20 favours network-aware heuristics (netconcurrency/holding) where sf15 favoured per-asset,
+# so 0B must seed from whatever 0A actually wins. Filled by resolve_base() in main().
+BASE_NESTED: dict = {}   # {agent_type, extra}       — warmstart base / dcl / ppo curriculum
+BASE_FLAT: dict = {}     # {agent_type, **params}    — rollout_policy (flat schema)
+WS_FLIP: dict = {}       # explore_flip-wrapped base — ADP warmstart
+WS_PLAIN: dict = {}      # bare base                 — ADP ctrl_noflip
 
 
-def _perasset_extra() -> dict:
-    src = _PA_SNELLIUS if _PA_SNELLIUS.exists() else _PA_LAPTOP
-    raw = json.loads(src.read_text())
-    pa = {k: v for k, v in raw.items() if k != "best_value"}
-    n_assets = sum(1 for k in pa if k.startswith("renovate_threshold_"))
-    print(f"per-asset base params: {src.relative_to(ROOT)} ({len(pa)} keys, {n_assets} assets)"
-          f"{'  [LAPTOP FALLBACK — re-run after 0A]' if src is _PA_LAPTOP else ''}")
-    return pa
+def _gpe() -> float:
+    inst = json.loads((ROOT / INSTANCE).read_text())
+    return inst["gamma"] ** inst["dt"]
 
 
-PA = _perasset_extra()
-PERASSET = {"agent_type": "reactiveperasset", "extra": PA}          # nested (warmstart/dcl/ppo)
-PERASSET_FLAT = {"agent_type": "reactiveperasset", **PA}            # flat (rollout_policy)
-WS_FLIP = {"agent_type": "explore_flip", "extra": {"base": PERASSET}}
-WS_PLAIN = PERASSET
+def _held_out_cost(run_dir: Path, gpe: float):
+    """Mean discounted held-out cost from a 0A run's eval_episodes.csv (None if absent)."""
+    import csv
+    from collections import defaultdict
+    f = run_dir / "eval_episodes.csv"
+    if not f.exists():
+        return None
+    eps = defaultdict(float)
+    with open(f, newline="") as fh:
+        for row in csv.DictReader(fh):
+            eps[int(row["episode"])] += (gpe ** int(row["t"])) * float(row["cost"])
+    return (sum(eps.values()) / len(eps)) if eps else None
+
+
+def _agent_type(heuristic: str) -> str:
+    return "reactiveperasset" if heuristic == "perasset" else heuristic
+
+
+def resolve_base(results_glob: str, force: str | None) -> str:
+    """Set BASE_NESTED/BASE_FLAT/WS_FLIP/WS_PLAIN from the 0A winner (lowest held-out cost)
+    found under `results_glob`. `--base <h>` forces a heuristic; if no rankable 0A results
+    exist, fall back to the laptop per-asset tune so the pipeline stays runnable. Returns a
+    short label for logging."""
+    import glob as _glob
+    global BASE_NESTED, BASE_FLAT, WS_FLIP, WS_PLAIN
+    gpe = _gpe()
+    ranked = []
+    for d in sorted(_glob.glob(str(ROOT / results_glob))):
+        d = Path(d)
+        if not (d / "best_params.json").exists():
+            continue
+        h = d.name.split("optuna_")[-1]
+        ranked.append((h, _held_out_cost(d, gpe), d))
+
+    chosen = None
+    if force:
+        for h, cost, d in ranked:
+            if h == force:
+                chosen = (h, cost, d)
+                break
+        if chosen is None:
+            raise SystemExit(f"--base {force!r} not found under {results_glob}")
+    else:
+        rankable = sorted([r for r in ranked if r[1] is not None], key=lambda r: r[1])
+        chosen = rankable[0] if rankable else None
+
+    if chosen is None:
+        lap = ROOT / "results" / "cal" / "sf20_perasset" / "best_params.json"
+        params = {k: v for k, v in json.loads(lap.read_text()).items() if k != "best_value"}
+        atype, label = "reactiveperasset", "perasset (laptop fallback — re-run after 0A)"
+    else:
+        h, cost, d = chosen
+        params = {k: v for k, v in json.loads((d / "best_params.json").read_text()).items()
+                  if k != "best_value"}
+        atype = _agent_type(h)
+        label = f"{h} ({'forced' if force else 'winner'}" + \
+                (f", held-out {cost/1e6:.0f}M" if cost is not None else ", no eval") + ")"
+
+    BASE_NESTED = {"agent_type": atype, "extra": params}
+    BASE_FLAT = {"agent_type": atype, **params}
+    WS_FLIP = {"agent_type": "explore_flip", "extra": {"base": BASE_NESTED}}
+    WS_PLAIN = BASE_NESTED
+    print(f"0B base policy: {label}  [{len(params)} params, agent_type={atype}]")
+    return label
 
 # ---- item 5/6 shared blocks (learners that TRAIN) ------------------------------------------
 POSTMORTEM = {"defer_eval": True, "snapshot_interval_seconds": 3600}
@@ -87,7 +145,8 @@ def gen_0a() -> list[str]:
 # 0B-i — ADP grid (12): vfa×ab×nstep (8) + one-factor-off controls (4). Mirrors gen_adp_nstep_grid.
 # ============================================================================================
 def _adp(stem, *, vfa="xgboost", ab=False, n_step=4, ag="local_search",
-         init="policy", buf="stochastic_knockout", ws=WS_FLIP) -> tuple[str, dict]:
+         init="policy", buf="stochastic_knockout", ws=None) -> tuple[str, dict]:
+    ws = WS_FLIP if ws is None else ws   # resolve at call time (after resolve_base sets it)
     run_name = f"exp0/sf20_adp2_{stem}"
     cfg = _base(run_name)
     cfg["training"] = {"time_budget": 86400, "update_interval": 50,
@@ -126,7 +185,7 @@ def gen_rollout() -> list[str]:
             cfg["agent"] = {"agent_type": atype, "extra": {
                 "n_rollouts": 20, "action_threshold": 0.5, "rollout_selection": "adaptive",
                 "p_threshold": 0.02, "min_rollouts": 20, "max_rollouts": 100,
-                "initial_action": init, "rollout_policy": PERASSET_FLAT, "rollout_horizon": 100}}
+                "initial_action": init, "rollout_policy": BASE_FLAT, "rollout_horizon": 100}}
             paths.append(write(run_name, cfg))
     return paths
 
@@ -146,7 +205,7 @@ def gen_ppo() -> list[str]:
                        "curriculum_additive_travel": True,      # item 4
                        "curriculum_phase_budget_frac": 0.5,     # item 4: guarantee Phase 2 runs
                        "curriculum_phase1_max_episodes": 0,
-                       "curriculum_heuristic": PERASSET}
+                       "curriculum_heuristic": BASE_NESTED}
     cfg["agent"] = {"agent_type": "ppo", "extra": {
         "hidden_dims": [64, 64],
         "ppo_kwargs": {"actor_lr": 0.0003, "critic_lr": 0.001, "clip_eps": 0.2,
@@ -179,7 +238,7 @@ def _dcl(stem, *, action_search="sequential", policy_type="xgboost", rollout_sel
         ex.update(extra_sel)
     ex.update({"action_threshold": 0.5, "initial_action": "policy"})
     ex.update(_DCL_NN if policy_type == "nn" else _DCL_XGB)
-    ex["heuristic_policy"] = PERASSET
+    ex["heuristic_policy"] = BASE_NESTED
     cfg["agent"] = {"agent_type": "dcl", "extra": ex}
     return run_name, cfg
 
@@ -208,13 +267,30 @@ def _registry(paths: list[str]) -> list[dict]:
 
 
 def main():
-    a0 = gen_0a()
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--results-glob", default="results/exp0/sf20_optuna_*",
+                    help="where to find 0A runs (best_params.json + eval_episodes.csv) to pick the "
+                         "winner from. Default = the Snellius 0A output.")
+    ap.add_argument("--base", default=None,
+                    help="force a specific 0A heuristic as the 0B base (e.g. netconcurrency) "
+                         "instead of the auto-selected winner.")
+    ap.add_argument("--only-0b", action="store_true",
+                    help="regenerate only the 0B configs (0A already dispatched/unchanged).")
+    args = ap.parse_args()
+
+    resolve_base(args.results_glob, args.base)   # sets BASE_NESTED/BASE_FLAT/WS_FLIP/WS_PLAIN
+
+    a0 = [] if args.only_0b else gen_0a()
     # 0B order (registry array indexing): ppo, rollout(4), adp(12), dcl(10) = 27
     b0 = gen_ppo() + gen_rollout() + gen_adp() + gen_dcl()
     REG.mkdir(parents=True, exist_ok=True)
-    (REG / "sf20_0a.json").write_text(json.dumps(_registry(a0), indent=2) + "\n")
+    if a0:
+        (REG / "sf20_0a.json").write_text(json.dumps(_registry(a0), indent=2) + "\n")
     (REG / "sf20_0b.json").write_text(json.dumps(_registry(b0), indent=2) + "\n")
-    print(f"\n0A: {len(a0)} configs -> hpc/registries/sf20_0a.json")
+    if a0:
+        print(f"\n0A: {len(a0)} configs -> hpc/registries/sf20_0a.json")
     print(f"0B: {len(b0)} configs -> hpc/registries/sf20_0b.json")
     for p in a0 + b0:
         print("  ", p)
