@@ -243,6 +243,13 @@ def build_experiment(config: ExperimentConfig):
         checkpoint_interval_seconds=float(tc_dict.get('checkpoint_interval_seconds', 1800.0)),
         config_hash=_config_hash,
         n_workers=int(tc_dict.get('n_workers', 1)),
+        snapshot_interval_seconds=float(tc_dict.get('snapshot_interval_seconds', 0.0)),
+        defer_eval=bool(tc_dict.get('defer_eval', False)),
+        early_stop_patience=int(tc_dict.get('early_stop_patience', 0)),
+        early_stop_tol=float(tc_dict.get('early_stop_tol', 0.005)),
+        early_stop_min_seconds=float(tc_dict.get('early_stop_min_seconds', 0.0)),
+        early_stop_episodes=int(tc_dict.get('early_stop_episodes', 0)),
+        early_stop_interval_seconds=float(tc_dict.get('early_stop_interval_seconds', 0.0)),
     )
 
     # 8. Logger
@@ -428,17 +435,33 @@ def build_experiment(config: ExperimentConfig):
             time_budget=float(tc_dict.get('time_budget', 3600.0)),
             T_tail=_T_tail,
             curriculum_phase0_episodes=int(tc_dict.get('curriculum_phase0_episodes', 0)),
+            curriculum_phase0_mode=str(tc_dict.get('curriculum_phase0_mode', 'bc')),
             curriculum_phase1_plateau_window=int(tc_dict.get('curriculum_phase1_plateau_window', 5)),
             curriculum_phase1_plateau_tol=float(tc_dict.get('curriculum_phase1_plateau_tol', 0.01)),
             curriculum_reset_critic=bool(tc_dict.get('curriculum_reset_critic', False)),
+            curriculum_phase_budget_frac=float(tc_dict.get('curriculum_phase_budget_frac', 0.5)),
+            curriculum_phase1_max_episodes=int(tc_dict.get('curriculum_phase1_max_episodes', 0)),
         )
+
+        # Naive-additive curriculum travel (item 4): default on. The curriculum env keeps
+        # maintenance + risk and gains a cheap, non-zero, per-project travel signal (sum of
+        # per-asset marginal single-closure costs; no synergy — Phase 2 on the real env adds
+        # that). Set training.curriculum_additive_travel=false to recover the old 0-travel env.
+        _additive_curriculum = bool(tc_dict.get('curriculum_additive_travel', True))
 
         curriculum_env = None
         heuristic_agent = None
         if ppo_config.curriculum_phase0_episodes > 0:
-            simplified_config = dataclasses.replace(env_config, traffic_cost_factor=0.0)
+            if _additive_curriculum:
+                from env.mdp import compute_additive_travel_lut
+                _lut = compute_additive_travel_lut(env)     # on the real-TAP env, once
+                simplified_config = env_config              # additive travel bypasses tcf
+            else:
+                simplified_config = dataclasses.replace(env_config, traffic_cost_factor=0.0)
             curriculum_env = InfraEnv(network, NullTAP(), simplified_config,
                                       rng_seed=config.seed + 9999)
+            if _additive_curriculum:
+                curriculum_env._additive_travel = _lut
             # Phase-0 imitation target: configurable via training.curriculum_heuristic
             # ({"agent_type": ..., "extra": {...}}, same schema as warmstart). Built on
             # the simplified curriculum env. Falls back to a hardcoded reactive heuristic
@@ -488,6 +511,8 @@ def build_experiment(config: ExperimentConfig):
             config_hash=_config_hash,
             n_workers=int(tc_dict.get('n_workers', 1)),
             tap_backend=config.tap_backend,
+            snapshot_interval_seconds=float(tc_dict.get('snapshot_interval_seconds', 0.0)),
+            defer_eval=bool(tc_dict.get('defer_eval', False)),
         )
         trainer = DCLTrainer(agent, env, dcl_config, logger)
     else:

@@ -23,7 +23,61 @@ matters. Each step is small enough to be tractable before committing compute to 
 
 ---
 
-## Experiment 0 — Exploration on `instance_10p`
+## Experiment 0 on `instance_sf20` — CURRENT SUBJECT (supersedes i10p / sf15)
+
+> The Exp-0 subject is now **`instance_sf20`** (N=20; ~3-yr renovations, ~14-yr lifespans; ~5 renovation
+> cycles/asset in-horizon). It is the **item-1 redesign** of sf15 — sf15's 22.7-yr renovations gave only
+> ~1 cycle/episode and an effectively-infinite tail, which structurally hurt learning. sf20 keeps the
+> anticipation gap (travel fraction 79%, clairvoyant floor **1653M** vs tuned reactive **4806M → gap
+> 61%**) while making renovations realistic. Full rationale + the 8-item diagnosis:
+> [docs/rl_underperformance_action_plan.md](docs/rl_underperformance_action_plan.md); instance details:
+> [[instance_sf20_redesign]] and `instances/instance_sf20.json`.
+
+**Configs are generated, not hand-written** — [configs/gen_sf20_configs.py](configs/gen_sf20_configs.py)
+writes all 8 (0A) + 27 (0B) configs and both registries. It bakes the 0A per-asset winner into every 0B
+consumer block, so the pipeline is **0A → regenerate → 0B**:
+
+```
+# 1. Tune the 8 heuristics (0A). Writes results/exp0/sf20_optuna_<h>/best_params.json.
+bash hpc/submit.sh hpc/registries/sf20_0a.json 0-7          # job rl_sf20_0a
+
+# 2. Re-run the generator so 0B seeds from the 0A WINNER (lowest held-out cost across
+#    all 8 heuristics — sf20 tends to favour netconcurrency/holding, not per-asset).
+#    --base <h> forces a specific heuristic; --only-0b skips 0A. Falls back to the
+#    laptop per-asset tune until 0A results exist.
+python configs/gen_sf20_configs.py --only-0b        # reads results/exp0/sf20_optuna_*
+
+# 3. Run the 27 learners (0B).
+bash hpc/submit.sh hpc/registries/sf20_0b.json 0-26         # job rl_sf20_0b
+
+# 4. Post-mortem evaluation (item 6): ADP + DCL run with defer_eval + hourly snapshots, so their
+#    authoritative 50-ep CRN eval runs OFFLINE (never competing with the training budget):
+python experiments/evaluate_checkpoints.py --config configs/sf20_adp2_xgb_abon_ns4.json   # per run
+#    → writes results/exp0/sf20_.../eval_curve.csv (mean + P50/P90/CVaR vs wall-clock).
+```
+
+**0B registry index map** (`hpc/registries/sf20_0b.json`, 27 entries): ppo=0 · rollout=1-4
+(`rollout_{empty,policy}`, `seq_rollout_{empty,policy}`) · ADP=5-16 (adp2 12-cell grid) · DCL=17-26.
+
+**Infra changes reflected in the configs** (see the action-plan doc):
+- **item 4** — PPO curriculum: `curriculum_additive_travel=true` (per-asset marginal travel, no synergy;
+  Phase 2 adds it) + `curriculum_phase_budget_frac=0.5` (force-graduate → Phase 2 always runs) +
+  `curriculum_phase0_mode="bc"` (Phase 0 = behavioral-cloning actor + normal critic regression, warming
+  both heads on the additive-travel curriculum). Fixes the sf15 "stuck in Phase 1 forever on a 0-travel
+  env" failure and the "never starts near the heuristic" symptom.
+- **item 6** — ADP + DCL set `defer_eval=true` + `snapshot_interval_seconds=3600`; eval is post-mortem.
+  Rollout stays eval-only (no training to protect; its 50-ep eval is resumable via checkpoints).
+- **item 5** — ADP cells carry a cheap patience early-stop (`early_stop_patience=4`, min 4h floor).
+- **item 7** — reporting only: `comparison_dashboard.py` + `evaluate_checkpoints.py` now surface P90/CVaR.
+
+Baselines to compare against: `configs/sf20_clairvoyant.json` (perfect-info floor) and the 8 0A heuristics.
+**Still to do before the final read:** a full Snellius 0A per-asset tune (the laptop 60-dim tune is
+under-converged — see [[instance_sf20_redesign]]); items 2 & 3 (rollout truncation, ADP exploration) are
+expected to benefit from the shorter cycles but are not yet re-measured on sf20.
+
+---
+
+## Experiment 0 — Exploration on `instance_10p` (ARCHIVED — see sf20 above)
 
 > **⚠️ Instance regenerated 2026-06-19 — exp0 re-run in progress.** A predictability analysis
 > ([docs/i10p_predictability_analysis.md](docs/i10p_predictability_analysis.md)) found the original

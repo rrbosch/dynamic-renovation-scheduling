@@ -58,6 +58,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from utils.metrics import cost_summary  # noqa: E402  (tail stats: CVaR / P90 / max)
 from vis._charts import (  # noqa: E402
     ACTION_NAMES,
     get_n_assets, get_episode,
@@ -727,10 +728,18 @@ def make_summary_table(groups: list[dict]) -> pd.DataFrame:
         std = float(arr.std(ddof=1)) if n > 1 else 0.0
         se = std / np.sqrt(n) if n > 1 else 0.0
         ci95 = 1.96 * se
+        # Distributional tail stats over the pooled per-episode costs (item 7): the
+        # sf15/sf20 story is median-wins / tail-loses, so surface P90 and CVaR@10%
+        # (mean of the worst 10% of episodes) alongside the mean.
+        ts = cost_summary(all_costs, cvar_alpha=0.1)
         rows.append({
             "Algorithm": g["group_label"],
             "Seeds": n,
             "Mean Cost": f"{mean:,.0f}",
+            "P50": f"{ts['p50']:,.0f}",
+            "P90": f"{ts['p90']:,.0f}",
+            "CVaR 10%": f"{ts['cvar']:,.0f}",
+            "Max Ep": f"{ts['max']:,.0f}",
             "Std (seeds)": f"{std:,.0f}" if n > 1 else "-",
             "95% CI": f"+/- {ci95:,.0f}" if n > 1 else "-",
             "Best Seed": f"{min(seed_means):,.0f}",

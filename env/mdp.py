@@ -112,6 +112,14 @@ class InfraEnv:
         )
         self._c_travel_baseline = float(np.sum(bl_flows * bl_tt))
         self.last_cost_breakdown = (0.0, 0.0, 0.0)  # (c_travel, c_maint, c_risk)
+        # Optional NAIVE-ADDITIVE travel mode (PPO curriculum, item 4). When set to
+        # (ct_ren, ct_res) — per-asset marginal single-closure travel costs (€, already
+        # tcf/vot/dt-scaled; see compute_additive_travel_lut) — c_travel is the SUM of the
+        # active assets' marginals instead of a TAP solve. This drops the super-additive
+        # congestion synergy (that is precisely what Phase 2 on the real env then adds),
+        # giving the curriculum a cheap, non-zero, per-project travel signal. None ⇒ normal
+        # TAP-based travel (no hot-path cost for real envs).
+        self._additive_travel: Optional[tuple[np.ndarray, np.ndarray]] = None
 
     # ------------------------------------------------------------------
     # Episode randomness keying
@@ -205,7 +213,8 @@ class InfraEnv:
         flows = self.tap_fn.solve(caps)
 
         # 5. Cost (use post-action capacities already computed above)
-        total, c_travel, c_maint, c_risk = self._compute_cost(state, action, flows, caps)
+        total, c_travel, c_maint, c_risk = self._compute_cost(state, action, flows, caps,
+                                                              s_post=state_post)
         cost = total
         self.last_cost_breakdown = (c_travel, c_maint, c_risk)
 
@@ -298,11 +307,22 @@ class InfraEnv:
     # Travel cost helper (for action generators)
     # ------------------------------------------------------------------
 
+    def _additive_c_travel(self, s_post: State) -> float:
+        """Naive-additive travel: sum the per-asset marginal single-closure costs of the
+        currently-active assets (renovation precedence over restriction). See
+        `_additive_travel` / `compute_additive_travel_lut`."""
+        ct_ren, ct_res = self._additive_travel
+        under_ren = s_post.h > 0
+        under_load = (s_post.ell > 0) & (~under_ren)
+        return float(np.sum(ct_ren[under_ren]) + np.sum(ct_res[under_load]))
+
     def travel_cost(self, s_post: State) -> float:
         """
         Compute c_travel for a given post-decision state by calling TAP.
         Used by action generators to include traffic cost in Q(s, a).
         """
+        if self._additive_travel is not None:
+            return self._additive_c_travel(s_post)
         cfg = self.config
         net = self.network
         caps = self._effective_capacities(s_post)
@@ -392,17 +412,22 @@ class InfraEnv:
     # ------------------------------------------------------------------
 
     def _compute_cost(self, state: State, action: np.ndarray,
-                      flows: np.ndarray, caps: np.ndarray) -> tuple[float, float, float, float]:
+                      flows: np.ndarray, caps: np.ndarray,
+                      s_post: 'State | None' = None) -> tuple[float, float, float, float]:
         """Travel time cost + maintenance costs + escalating risk."""
         cfg = self.config
         net = self.network
 
-        # Traffic cost using already-computed post-decision capacities
-        tt = net.free_flow_tt * (
-            1.0 + net.bpr_beta * (flows / np.maximum(caps, 1e-9)) ** net.bpr_nu
-        )
-        extra_veh_hours = (float(np.sum(flows * tt)) - self._c_travel_baseline) / 60.0
-        c_travel = cfg.traffic_cost_factor * cfg.vot * extra_veh_hours * cfg.dt * 365
+        if self._additive_travel is not None and s_post is not None:
+            # Naive-additive curriculum travel (item 4): no TAP, no synergy.
+            c_travel = self._additive_c_travel(s_post)
+        else:
+            # Traffic cost using already-computed post-decision capacities
+            tt = net.free_flow_tt * (
+                1.0 + net.bpr_beta * (flows / np.maximum(caps, 1e-9)) ** net.bpr_nu
+            )
+            extra_veh_hours = (float(np.sum(flows * tt)) - self._c_travel_baseline) / 60.0
+            c_travel = cfg.traffic_cost_factor * cfg.vot * extra_veh_hours * cfg.dt * 365
 
         # Construction costs (c_ren = 50_000 * length, c_rep = 25_000 * length)
         c_maint = float(
@@ -459,3 +484,27 @@ class InfraEnv:
     @property
     def t(self) -> int:
         return self._t
+
+
+def compute_additive_travel_lut(env: 'InfraEnv') -> tuple[np.ndarray, np.ndarray]:
+    """Per-asset marginal single-closure travel costs for the naive-additive curriculum (item 4).
+
+    For each asset i, ``ct_ren[i]`` = the real (TAP-based) travel cost when *only* asset i is under
+    renovation (η_ren) from an otherwise-pristine network, and ``ct_res[i]`` likewise for restriction
+    (η_load). Values are in € (tcf/vot/dt-scaled, exactly as env.travel_cost returns), so the additive
+    curriculum travel is just their sum over active assets — no synergy. Must be called on a
+    **real-TAP** env (before any additive mode is enabled); ~2N TAP solves, once."""
+    if env._additive_travel is not None:
+        raise ValueError("compute_additive_travel_lut must run on a real-TAP env (additive mode off).")
+    n = env.config.n_assets
+    z = np.zeros(n)
+    ct_ren = np.zeros(n)
+    ct_res = np.zeros(n)
+    for i in range(n):
+        s_ren = State(z.copy(), z.copy(), z.copy(), z.copy(), z.copy())
+        s_ren.h[i] = 1.0                      # asset i under renovation
+        ct_ren[i] = env.travel_cost(s_ren)
+        s_res = State(z.copy(), z.copy(), z.copy(), z.copy(), z.copy())
+        s_res.ell[i] = 1.0                    # asset i restricted
+        ct_res[i] = env.travel_cost(s_res)
+    return ct_ren, ct_res

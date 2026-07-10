@@ -141,6 +141,11 @@ class DCLConfig:
     config_hash: str = ''
     n_workers: int = 1                     # process pool for collection + eval
     tap_backend: str = 'fast'              # for env reconstruction in workers
+    # Post-mortem evaluation (item 6): when snapshot_interval_seconds > 0, write a
+    # history-kept agent-only snapshot per round (wall-clock gated) to
+    # results/<run>/snapshots/t_<elapsed>s/; defer_eval skips the in-loop eval.
+    snapshot_interval_seconds: float = 0.0
+    defer_eval: bool = False
 
 
 class DCLTrainer:
@@ -152,6 +157,7 @@ class DCLTrainer:
         self.seed = config.seed
         self.value_fn = self._build_value_fn() if config.rollout_horizon is not None else None
         self._last_checkpoint_dir: str | None = None
+        self._last_snapshot_wall: float = 0.0
         # TAP backend for env reconstruction in spawn workers. Prefer the config
         # value; fall back to the tag build_experiment stamps on the env.
         self._tap_backend = config.tap_backend or getattr(env, '_tap_backend_name', 'fast')
@@ -171,6 +177,7 @@ class DCLTrainer:
         t_start = time.monotonic()
         decomposition = self.agent.policy
 
+        rnd = start_ep - 1  # defensive: keep `rnd` bound if the loop body never runs
         for rnd in range(start_ep, cfg.n_rounds):
             elapsed = already_elapsed + (time.monotonic() - t_start)
             if cfg.time_budget and elapsed >= cfg.time_budget:
@@ -195,7 +202,7 @@ class DCLTrainer:
             if self.value_fn is not None and vf_states:
                 self.value_fn.fit_targets(vf_states, np.asarray(vf_targets, dtype=float))
 
-            if (rnd + 1) % cfg.eval_interval == 0 or rnd == cfg.n_rounds - 1:
+            if not cfg.defer_eval and ((rnd + 1) % cfg.eval_interval == 0 or rnd == cfg.n_rounds - 1):
                 results = self.evaluate(cfg.n_eval_episodes)
                 elapsed = already_elapsed + (time.monotonic() - t_start)
                 self.logger.log_step(rnd + 1, {
@@ -208,7 +215,9 @@ class DCLTrainer:
                       f"mean_cost={results['mean_cost']:.2f} ± {results['std_cost']:.2f}")
 
             self._save_checkpoint(rnd, already_elapsed + (time.monotonic() - t_start))
+            self._maybe_snapshot(rnd, t_start, already_elapsed)
 
+        self._maybe_snapshot(rnd, t_start, already_elapsed, final=True)
         self._mark_complete()
 
     # ------------------------------------------------------------------
@@ -366,6 +375,25 @@ class DCLTrainer:
             shutil.rmtree(self._last_checkpoint_dir, ignore_errors=True)
         self._last_checkpoint_dir = ckpt_dir
         print(f"[Checkpoint] DCL round {rnd} -> {ckpt_dir}")
+
+    def _save_snapshot(self, rnd: int, elapsed: float) -> None:
+        """History-kept agent-only snapshot for post-mortem eval (see Trainer._save_snapshot)."""
+        snap_dir = os.path.join(str(self.logger.run_dir), 'snapshots', f't_{int(elapsed)}s')
+        agent_dir = os.path.join(snap_dir, 'agent')
+        os.makedirs(agent_dir, exist_ok=True)
+        self.agent.save(agent_dir)
+        with open(os.path.join(snap_dir, 'meta.json'), 'w') as f:
+            json.dump({'episode': int(rnd), 'elapsed_seconds': round(float(elapsed), 1),
+                       'config_hash': self.config.config_hash}, f)
+
+    def _maybe_snapshot(self, rnd: int, t_start: float, already_elapsed: float,
+                        final: bool = False) -> None:
+        if self.config.snapshot_interval_seconds <= 0:
+            return
+        elapsed = already_elapsed + (time.monotonic() - t_start)
+        if final or (elapsed - self._last_snapshot_wall >= self.config.snapshot_interval_seconds):
+            self._save_snapshot(rnd, elapsed)
+            self._last_snapshot_wall = elapsed
 
     def _mark_complete(self) -> None:
         if self._last_checkpoint_dir is None:
