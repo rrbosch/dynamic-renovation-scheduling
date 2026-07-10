@@ -41,9 +41,11 @@ consumer block, so the pipeline is **0A → regenerate → 0B**:
 # 1. Tune the 8 heuristics (0A). Writes results/exp0/sf20_optuna_<h>/best_params.json.
 bash hpc/submit.sh hpc/registries/sf20_0a.json 0-7          # job rl_sf20_0a
 
-# 2. Re-run the generator so 0B picks up the Snellius-tuned per-asset params
-#    (until then it falls back to the laptop tune, results/cal/sf20_perasset).
-python configs/gen_sf20_configs.py
+# 2. Re-run the generator so 0B seeds from the 0A WINNER (lowest held-out cost across
+#    all 8 heuristics — sf20 tends to favour netconcurrency/holding, not per-asset).
+#    --base <h> forces a specific heuristic; --only-0b skips 0A. Falls back to the
+#    laptop per-asset tune until 0A results exist.
+python configs/gen_sf20_configs.py --only-0b        # reads results/exp0/sf20_optuna_*
 
 # 3. Run the 27 learners (0B).
 bash hpc/submit.sh hpc/registries/sf20_0b.json 0-26         # job rl_sf20_0b
