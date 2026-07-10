@@ -192,6 +192,25 @@ class TrainingConfig:
     checkpoint_interval_seconds: float = 1800.0  # 0 = disabled; save checkpoint every N wall-clock seconds
     config_hash: str = ''                        # stable hash of ExperimentConfig (excl. seed)
     n_workers: int = 1                           # parallel workers for eval/training episodes (1=sequential)
+    # Post-mortem evaluation (decouple eval cost from the training budget). When
+    # snapshot_interval_seconds > 0, a lightweight agent-only snapshot (no buffer) is
+    # written to results/<run>/snapshots/t_<elapsed>s/ every N wall-clock seconds AND
+    # once at the end of training — history is kept (never deleted). experiments/
+    # evaluate_checkpoints.py then reconstructs env+agent and runs the shared-CRN eval
+    # offline, producing a cost-vs-wallclock curve (mean + CVaR/P90). When defer_eval
+    # is True, the in-loop evaluate() calls (episode-based + wall-clock periodic) are
+    # skipped so the training budget goes entirely to training.
+    snapshot_interval_seconds: float = 0.0       # 0 = disabled
+    defer_eval: bool = False                     # True = skip in-loop eval; rely on post-mortem snapshots
+    # Early stopping (item 5). A *cheap* wall-clock-gated eval (early_stop_episodes, small)
+    # is the stopping signal — it coexists with defer_eval (whose authoritative 50-ep eval runs
+    # post-mortem). Stop when the best mean cost has not improved by > early_stop_tol (relative)
+    # for early_stop_patience consecutive checks, but never before early_stop_min_seconds.
+    early_stop_patience: int = 0                 # 0 = disabled
+    early_stop_tol: float = 0.005                # relative improvement threshold
+    early_stop_min_seconds: float = 0.0          # floor: no stop before this much wall-clock
+    early_stop_episodes: int = 0                 # 0 = use n_eval_episodes; small = cheap signal
+    early_stop_interval_seconds: float = 0.0     # 0 = use eval_interval_seconds as the cadence
 
 
 class Trainer:
@@ -230,6 +249,10 @@ class Trainer:
             self.buffer.refresh_errors_fn = self._refresh_buffer_errors
         self._last_checkpoint_dir: str | None = None
         self._last_checkpoint_wall: float = 0.0  # tracks elapsed time of last time-based checkpoint
+        self._last_snapshot_wall: float = 0.0    # tracks elapsed time of last eval snapshot
+        self._last_es_wall: float = 0.0          # tracks elapsed time of last early-stop check
+        self._es_best: float = float('inf')      # best (lowest) mean cost seen by early stopping
+        self._es_stale: int = 0                  # consecutive early-stop checks without improvement
 
     # ------------------------------------------------------------------
     # Checkpoint save / load
@@ -305,6 +328,64 @@ class Trainer:
             shutil.copy2(meta_path, meta_path.replace('metadata.json', 'metadata_backup.json'))
         except OSError:
             pass
+
+    def _save_snapshot(self, ep: int, elapsed: float) -> None:
+        """Lightweight, history-kept agent-only snapshot for post-mortem evaluation.
+
+        Unlike _save_checkpoint (buffer + latest-only, for resume), this writes just the
+        learned artifacts to results/<run>/snapshots/t_<elapsed>s/agent/ plus a small
+        meta.json, and never deletes prior snapshots — so evaluate_checkpoints.py can
+        build a cost-vs-wallclock curve. No buffer, no backup copies (snapshots are
+        frequent and disposable; the resume checkpoint remains the source of truth)."""
+        import os, json
+        snap_dir = os.path.join(str(self.logger.run_dir), 'snapshots', f't_{int(elapsed)}s')
+        agent_dir = os.path.join(snap_dir, 'agent')
+        os.makedirs(agent_dir, exist_ok=True)
+        self.agent.save(agent_dir)
+        with open(os.path.join(snap_dir, 'meta.json'), 'w') as f:
+            json.dump({'episode': int(ep), 'elapsed_seconds': round(float(elapsed), 1),
+                       'config_hash': self.config.config_hash}, f)
+
+    def _maybe_snapshot(self, ep: int, t_start: float, already_elapsed: float, cfg,
+                        final: bool = False) -> None:
+        """Save an eval snapshot if the wall-clock interval elapsed (or final=True)."""
+        if cfg.snapshot_interval_seconds <= 0:
+            return
+        elapsed = already_elapsed + (time.monotonic() - t_start)
+        if final or (elapsed - self._last_snapshot_wall >= cfg.snapshot_interval_seconds):
+            self._save_snapshot(ep, elapsed)
+            self._last_snapshot_wall = elapsed
+
+    def _maybe_early_stop(self, ep: int, t_start: float, already_elapsed: float, cfg) -> bool:
+        """Wall-clock-gated patience early stop on a *cheap* eval signal (item 5).
+
+        Runs a small eval every `early_stop_interval_seconds` (falling back to
+        `eval_interval_seconds`); stops when the best mean cost has not improved by
+        > early_stop_tol for early_stop_patience consecutive checks — but never before
+        early_stop_min_seconds. Runs even under defer_eval (it is the stopping signal;
+        the authoritative eval still happens post-mortem). Returns True to end training."""
+        if cfg.early_stop_patience <= 0:
+            return False
+        cadence = cfg.early_stop_interval_seconds or cfg.eval_interval_seconds
+        if cadence <= 0:
+            return False
+        elapsed = already_elapsed + (time.monotonic() - t_start)
+        if elapsed - self._last_es_wall < cadence:
+            return False
+        self._last_es_wall = elapsed
+        n = cfg.early_stop_episodes or cfg.n_eval_episodes
+        cur = self.evaluate(n)['mean_cost']
+        if cur < self._es_best * (1.0 - cfg.early_stop_tol):
+            self._es_best = cur
+            self._es_stale = 0
+        else:
+            self._es_stale += 1
+        if elapsed >= cfg.early_stop_min_seconds and self._es_stale >= cfg.early_stop_patience:
+            print(f"[early stop] no improvement (> {cfg.early_stop_tol:.1%}) for "
+                  f"{self._es_stale} checks; best mean_cost={self._es_best:.3e}. "
+                  f"Stopping at ep {ep}, {elapsed:.0f}s.")
+            return True
+        return False
 
     @staticmethod
     def _safe_load(primary: str, backup: str, load_fn):
@@ -468,6 +549,8 @@ class Trainer:
         t_start = time.monotonic()
         self._last_checkpoint_wall = already_elapsed  # reset clock relative to resume point
         self._last_eval_wall = already_elapsed        # wall-clock anchor for periodic eval
+        self._last_snapshot_wall = already_elapsed    # wall-clock anchor for eval snapshots
+        self._last_es_wall = already_elapsed          # wall-clock anchor for early-stop checks
         use_budget = bool(cfg.time_budget)
         # Remaining budget accounts for time already spent before this call
         remaining_budget = max(0.0, cfg.time_budget - already_elapsed) if use_budget else 0.0
@@ -502,6 +585,7 @@ class Trainer:
     def _train_sequential(self, start_ep, n_episodes, ep_length, cfg, env, agent,
                           use_budget, remaining_budget, t_start, already_elapsed,
                           _baseline_mb, _gc_check_interval):
+        ep = start_ep - 1  # defensive: keep `ep` bound if the loop body never runs
         for ep in range(start_ep, n_episodes):
             wall_elapsed = time.monotonic() - t_start
             if use_budget and wall_elapsed >= remaining_budget:
@@ -549,8 +633,8 @@ class Trainer:
                     gc.collect()
                     _baseline_mb = _mem_mb()
 
-            # Evaluation
-            if (ep + 1) % cfg.eval_interval == 0:
+            # Evaluation (skipped when eval is deferred to post-mortem snapshots)
+            if not cfg.defer_eval and (ep + 1) % cfg.eval_interval == 0:
                 results = self.evaluate(cfg.n_eval_episodes)
                 self.logger.log_step(ep + 1, results)
                 elapsed = already_elapsed + (time.monotonic() - t_start)
@@ -559,7 +643,8 @@ class Trainer:
                       f"± {results['std_cost']:.2f}")
 
             # Wall-clock-gated periodic eval (policy-improvement curve)
-            self._maybe_periodic_eval(ep + 1, t_start, already_elapsed, cfg)
+            if not cfg.defer_eval:
+                self._maybe_periodic_eval(ep + 1, t_start, already_elapsed, cfg)
 
             # Checkpoint
             if cfg.checkpoint_interval_seconds > 0:
@@ -570,6 +655,16 @@ class Trainer:
             elif cfg.checkpoint_interval > 0 and (ep + 1) % cfg.checkpoint_interval == 0:
                 elapsed = already_elapsed + (time.monotonic() - t_start)
                 self._save_checkpoint(ep + 1, elapsed)
+
+            # Lightweight eval snapshot for post-mortem evaluation (history kept)
+            self._maybe_snapshot(ep + 1, t_start, already_elapsed, cfg)
+
+            # Early stopping (cheap patience eval; coexists with defer_eval)
+            if self._maybe_early_stop(ep + 1, t_start, already_elapsed, cfg):
+                break
+
+        # Final snapshot capturing the end-of-training policy
+        self._maybe_snapshot(ep + 1, t_start, already_elapsed, cfg, final=True)
 
     def _train_parallel(self, start_ep, n_episodes, ep_length, cfg, env, agent,
                         use_budget, remaining_budget, t_start, already_elapsed,
@@ -621,8 +716,8 @@ class Trainer:
                     gc.collect()
                     _baseline_mb = _mem_mb()
 
-            # Evaluation
-            if ep % cfg.eval_interval == 0:
+            # Evaluation (skipped when eval is deferred to post-mortem snapshots)
+            if not cfg.defer_eval and ep % cfg.eval_interval == 0:
                 results = self.evaluate(cfg.n_eval_episodes)
                 self.logger.log_step(ep, results)
                 elapsed = already_elapsed + (time.monotonic() - t_start)
@@ -631,7 +726,8 @@ class Trainer:
                       f"± {results['std_cost']:.2f}")
 
             # Wall-clock-gated periodic eval (policy-improvement curve)
-            self._maybe_periodic_eval(ep, t_start, already_elapsed, cfg)
+            if not cfg.defer_eval:
+                self._maybe_periodic_eval(ep, t_start, already_elapsed, cfg)
 
             # Checkpoint
             if cfg.checkpoint_interval_seconds > 0:
@@ -642,6 +738,16 @@ class Trainer:
             elif cfg.checkpoint_interval > 0 and ep % cfg.checkpoint_interval == 0:
                 elapsed = already_elapsed + (time.monotonic() - t_start)
                 self._save_checkpoint(ep, elapsed)
+
+            # Lightweight eval snapshot for post-mortem evaluation (history kept)
+            self._maybe_snapshot(ep, t_start, already_elapsed, cfg)
+
+            # Early stopping (cheap patience eval; coexists with defer_eval)
+            if self._maybe_early_stop(ep, t_start, already_elapsed, cfg):
+                break
+
+        # Final snapshot capturing the end-of-training policy
+        self._maybe_snapshot(ep, t_start, already_elapsed, cfg, final=True)
 
     def _maybe_periodic_eval(self, ep, t_start, already_elapsed, cfg) -> None:
         """Wall-clock-gated policy eval logged to training_log.csv.

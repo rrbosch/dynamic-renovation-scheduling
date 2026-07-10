@@ -1,0 +1,19 @@
+{
+  "network": "sioux_falls",
+  "tap_backend": "fast",
+  "seed": 42,
+  "run_name": "cal/sf20_clairvoyant",
+  "instance": "instances/instance_sf20.json",
+  "training": {
+    "n_episodes": 1,
+    "n_eval_episodes": 20,
+    "n_workers": 10
+  },
+  "agent": {
+    "agent_type": "clairvoyant",
+    "extra": {
+      "use_dp": true,
+      "time_budget_s": 1200
+    }
+  }
+}

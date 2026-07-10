@@ -25,9 +25,19 @@ class PPOConfig:
     T_tail: float = 10.0          # eval tail horizon in years (epochs = T_tail/dt); matches Trainer
     # Phase 0
     curriculum_phase0_episodes: int = 0      # 0 = skip Phase 0
+    # Phase-0 warm-start mode: "bc" = behavioral-cloning actor (cross-entropy to the heuristic
+    # action) + normal critic regression (warms BOTH heads directly); "ppo" = advantage-weighted
+    # PPO update on heuristic trajectories (the older, weaker imitation). Runs on the curriculum
+    # env either way (additive-travel after item 4, so the critic term sees a real cost signal).
+    curriculum_phase0_mode: str = "bc"
     # Phase 1 (dynamic exit)
     curriculum_phase1_plateau_window: int = 5    # # eval checkpoints to look back
     curriculum_phase1_plateau_tol: float = 0.01  # relative improvement < tol → plateau
+    # Phase 1 force-graduation caps (item 4): guarantee Phase 2 (real env) always gets time.
+    # Phases 0+1 together get at most this fraction of time_budget before force-graduating;
+    # and/or a hard cap on Phase-1 episodes. 0 disables that particular cap.
+    curriculum_phase_budget_frac: float = 0.5
+    curriculum_phase1_max_episodes: int = 0
     # Phase 2
     curriculum_reset_critic: bool = False
 
@@ -62,6 +72,15 @@ class PPOTrainer:
         def _budget_exceeded():
             return use_budget and (already_elapsed + time.monotonic() - t_start) >= cfg.time_budget
 
+        # Curriculum (phases 0+1) force-graduation deadline: guarantee Phase 2 gets time.
+        # 0 fraction (or no budget) ⇒ no wall-clock cap.
+        _curr_deadline = (cfg.time_budget * cfg.curriculum_phase_budget_frac
+                          if use_budget and cfg.curriculum_phase_budget_frac > 0 else None)
+
+        def _curriculum_deadline_passed():
+            return _curr_deadline is not None and \
+                (already_elapsed + time.monotonic() - t_start) >= _curr_deadline
+
         # ── Phase 0: heuristic behavioral cloning ───────────────────────────
         phase0_baseline_cost = None
         if cfg.curriculum_phase0_episodes > 0 and self.heuristic_agent is not None \
@@ -74,10 +93,11 @@ class PPOTrainer:
                   f"{phase0_baseline_cost:.2f}")
 
             for ep in range(cfg.curriculum_phase0_episodes):
-                if _budget_exceeded():
+                if _budget_exceeded() or _curriculum_deadline_passed():
                     break
                 rollout = self._collect_phase0_rollout(self.curriculum_env, episode_idx=global_ep)
-                stats = self.agent.update_ppo(rollout)
+                stats = (self.agent.update_bc(rollout) if cfg.curriculum_phase0_mode == "bc"
+                         else self.agent.update_ppo(rollout))
                 global_ep += 1
 
                 if global_ep % cfg.eval_interval == 0:
@@ -90,9 +110,11 @@ class PPOTrainer:
                         'std_cost': results['std_cost'],
                         'phase': 0,
                     })
-                    print(f"[Phase 0] ep {global_ep:5d} | {elapsed:6.0f}s | "
+                    _al = stats.get('l_bc', stats.get('l_clip', 0.0))
+                    print(f"[Phase 0/{cfg.curriculum_phase0_mode}] ep {global_ep:5d} | {elapsed:6.0f}s | "
                           f"mean_cost={results['mean_cost']:.2f} "
-                          f"(baseline={phase0_baseline_cost:.2f})")
+                          f"(baseline={phase0_baseline_cost:.2f}) | "
+                          f"actor_loss={_al:.4f} l_value={stats.get('l_value', 0.0):.4f}")
 
             print("[Curriculum] Phase 0 done.")
 
@@ -102,12 +124,23 @@ class PPOTrainer:
             phase1_costs = []
             plateau_window = cfg.curriculum_phase1_plateau_window
             plateau_tol = cfg.curriculum_phase1_plateau_tol
+            phase1_eps = 0
 
             while not _budget_exceeded():
+                # Force-graduation caps (item 4): never let Phase 1 consume the whole budget.
+                if _curriculum_deadline_passed():
+                    print("[Curriculum] Phase 1 force-graduation: curriculum time budget reached.")
+                    break
+                if cfg.curriculum_phase1_max_episodes > 0 and \
+                        phase1_eps >= cfg.curriculum_phase1_max_episodes:
+                    print(f"[Curriculum] Phase 1 force-graduation: "
+                          f"{phase1_eps} episodes (max {cfg.curriculum_phase1_max_episodes}).")
+                    break
                 rollout = self._collect_rollout(self.curriculum_env,
                                                 phase="curriculum_train", episode_idx=global_ep)
                 stats = self.agent.update_ppo(rollout)
                 global_ep += 1
+                phase1_eps += 1
 
                 if global_ep % cfg.eval_interval == 0:
                     results = self.evaluate(cfg.n_eval_episodes,

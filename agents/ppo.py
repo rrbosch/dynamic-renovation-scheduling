@@ -347,6 +347,70 @@ class PPOAgent(Agent):
             'entropy': total_entropy / denom,
         }
 
+    def update_bc(self, rollout: RolloutBuffer) -> dict:
+        """Phase-0 warm start: **behavioral cloning** actor + normal critic regression.
+
+        Actor: per-asset cross-entropy toward the (deterministic) heuristic action — a direct,
+        one-hot imitation target, unlike ``update_ppo``'s advantage-weighted nudge. Critic: the
+        same standardized-return MSE as ``update_ppo`` (so the critic is warm-started on the
+        heuristic's returns under the curriculum env's cost). A small entropy bonus keeps the
+        cloned policy from collapsing to fully deterministic (which would starve Phase-1
+        exploration). Warms **both** heads. No ratios / advantages are used."""
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        from torch.distributions import Categorical
+
+        total_bc = 0.0
+        total_l_value = 0.0
+        total_entropy = 0.0
+        n_updates = 0
+
+        # Critic target normalization: identical to update_ppo (frozen for this update).
+        if rollout._returns is not None:
+            self._ret_rms.update(rollout._returns)
+        ret_mean, ret_std = self._ret_rms.mean, self._ret_rms.std
+
+        for _ in range(self.ppo_epochs):
+            for batch in rollout.mini_batches(self.mini_batch_size):
+                logits = self.actor.forward(batch.states)   # (B, N, 4)
+                logits = logits.masked_fill(~batch.masks, -1e9)
+
+                # Actor BC: -log pi(a_heuristic | s), summed over assets, averaged over batch.
+                log_probs = F.log_softmax(logits, dim=-1)   # (B, N, 4)
+                chosen = log_probs.gather(-1, batch.actions.unsqueeze(-1)).squeeze(-1)  # (B, N)
+                l_bc = -chosen.sum(dim=-1).mean()
+
+                dist = Categorical(logits=logits)
+                entropy = dist.entropy().sum(dim=-1).mean()
+
+                # Critic: standardized-return regression (same as update_ppo).
+                values = self.critic.forward(batch.states)  # (B,) normalized
+                ret_target = (batch.returns - ret_mean) / ret_std
+                l_value = F.mse_loss(values, ret_target)
+
+                loss = l_bc + self.value_coef * l_value - self.entropy_coef * entropy
+
+                self.actor._optimizer.zero_grad()
+                self._critic_opt.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.actor._model.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(self.critic._model.parameters(), 0.5)
+                self.actor._optimizer.step()
+                self._critic_opt.step()
+
+                total_bc += l_bc.item()
+                total_l_value += l_value.item()
+                total_entropy += entropy.item()
+                n_updates += 1
+
+        denom = max(n_updates, 1)
+        return {
+            'l_bc': total_bc / denom,
+            'l_value': total_l_value / denom,
+            'entropy': total_entropy / denom,
+        }
+
     def evaluate_action(
         self, state: State, action: np.ndarray, mask: np.ndarray
     ) -> tuple[float, float]:

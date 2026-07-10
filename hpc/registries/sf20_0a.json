@@ -1,0 +1,42 @@
+[
+  {
+    "config": "configs/sf20_optuna_reactive.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf20_optuna_paced.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf20_optuna_perasset.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf20_optuna_leadtime.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf20_optuna_netconcurrency.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf20_optuna_holding.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf20_optuna_valuedensity.json",
+    "run_name": null,
+    "seed": null
+  },
+  {
+    "config": "configs/sf20_optuna_worstfirst.json",
+    "run_name": null,
+    "seed": null
+  }
+]

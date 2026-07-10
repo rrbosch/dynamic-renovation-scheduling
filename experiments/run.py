@@ -190,14 +190,24 @@ def _run_one(config_path: str, args, auto_resume: bool = False) -> None:
     print("Training...")
     trainer.train(start_ep=start_ep, already_elapsed=already_elapsed)
 
-    # Save final evaluation and agent (episodes saved incrementally during evaluate)
-    results = trainer.evaluate(n_episodes=50, resume=True, save_episodes=True)
-    trainer.logger.save_agent(agent)
-    if results['episodes'] and hasattr(agent, 'value_fn') and agent.value_fn._fitted:
-        trainer.logger.save_buffer_predictions(trainer.buffer, agent)
-        trainer.logger.save_eval_predictions(results['episodes'], agent, env)
-    print(f"\nFinal evaluation: mean_cost={results['mean_cost']:.2f} ± {results['std_cost']:.2f}")
-    print(f"Results saved to: results/{config.run_name}/")
+    # Final evaluation. When defer_eval is set, the run relies on post-mortem
+    # evaluation of the training snapshots instead of an in-line eval (which would
+    # consume wall-clock that should go to training / a fair comparison).
+    _defer = bool(getattr(getattr(trainer, 'config', None), 'defer_eval', False))
+    if _defer:
+        trainer.logger.save_agent(agent)
+        print("\ndefer_eval=True: skipped in-line final eval. Evaluate the snapshots with:")
+        print(f"  python experiments/evaluate_checkpoints.py --config {config_path}")
+        print(f"Results (snapshots) under: results/{config.run_name}/snapshots/")
+    else:
+        # Save final evaluation and agent (episodes saved incrementally during evaluate)
+        results = trainer.evaluate(n_episodes=50, resume=True, save_episodes=True)
+        trainer.logger.save_agent(agent)
+        if results['episodes'] and hasattr(agent, 'value_fn') and agent.value_fn._fitted:
+            trainer.logger.save_buffer_predictions(trainer.buffer, agent)
+            trainer.logger.save_eval_predictions(results['episodes'], agent, env)
+        print(f"\nFinal evaluation: mean_cost={results['mean_cost']:.2f} ± {results['std_cost']:.2f}")
+        print(f"Results saved to: results/{config.run_name}/")
 
 
 def main():
