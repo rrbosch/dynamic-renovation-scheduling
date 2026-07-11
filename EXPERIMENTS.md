@@ -71,9 +71,25 @@ python experiments/evaluate_checkpoints.py --config configs/sf20_adp2_xgb_abon_n
 - **item 7** — reporting only: `comparison_dashboard.py` + `evaluate_checkpoints.py` now surface P90/CVaR.
 
 Baselines to compare against: `configs/sf20_clairvoyant.json` (perfect-info floor) and the 8 0A heuristics.
-**Still to do before the final read:** a full Snellius 0A per-asset tune (the laptop 60-dim tune is
-under-converged — see [[instance_sf20_redesign]]); items 2 & 3 (rollout truncation, ADP exploration) are
-expected to benefit from the shorter cycles but are not yet re-measured on sf20.
+
+### 0A — DONE (Snellius, 24h/heuristic). Winner = valuedensity; 0B seeded from it.
+Held-out frontier (50 CRN eps, disc γ_pe=0.9849, vs clairvoyant floor **1653M**):
+
+| heuristic | mean | gap | | heuristic | mean | gap |
+|---|---|---|---|---|---|---|
+| **valuedensity** ✅ | **4012M** | 59% | | perasset | 4956M | 67% |
+| holding | 4020M | 59% | | reactive | 5190M | 68% |
+| netconcurrency | 4071M | 59% | | leadtime | 5841M | 72% |
+| worstfirst | 4164M | 60% | | paced | 7358M | 78% |
+
+**Key result — sf20 favours network/value-aware heuristics; per-asset does NOT win** (5th, 4956M even
+with the full tune), a decisive contrast with sf15 (where per-asset was the runaway winner). The top four
+are a **statistical tie** (within ~4%). `gen_sf20_configs.py --only-0b` seeded all 0B blocks from the
+winner **valuedensity** (`--base <h>` to force another top-4 heuristic). All 27 0B configs build-canary OK.
+
+**Still to do:** run 0B (`bash hpc/submit.sh hpc/registries/sf20_0b.json 0-26`) + post-mortem eval; items
+2 & 3 (rollout truncation, ADP exploration) — expected to benefit from the shorter cycles, not yet
+re-measured on sf20.
 
 ---
 
